@@ -1,0 +1,27 @@
+# Virtual environments
+env/
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# API keys and personal config — copy api_keys.template.json → api_keys.json and fill in your key
+config/api_keys.json
+
+# Personal memory — generated at runtime, not shared
+memory/long_term.json
+
+# Large binary / driver files
+*.run
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -8,7 +8,7 @@ def weather_action(
     session_memory=None,
 ) -> str:
     city     = parameters.get("city")
-    when     = parameters.get("time", "today")  
+    when     = parameters.get("time", "today")
 
     if not city or not isinstance(city, str) or not city.strip():
         msg = "Sir, the city is missing for the weather report."
@@ -46,6 +46,6 @@ def _log(message: str, player=None) -> None:
     print(f"[Weather] {message}")
     if player:
         try:
-            player.write_log(f"JARVIS: {message}")
+            player.write_log(f"Moses: {message}")
         except Exception:
             pass

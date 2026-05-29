@@ -9,7 +9,7 @@ from pathlib import Path
 import sounddevice as sd
 from google import genai
 from google.genai import types
-from ui import JarvisUI
+from ui import MosesUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
 )
@@ -58,7 +58,7 @@ def _load_system_prompt() -> str:
         return PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are JARVIS, Tony Stark's AI assistant. "
+            "You are Moses, an advanced AI assistant. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
@@ -370,11 +370,11 @@ TOOL_DECLARATIONS = [
         }
     },
     {
-        "name": "shutdown_jarvis",
+        "name": "shutdown_moses",
         "description": (
             "Shuts down the assistant completely. "
             "Call this when the user expresses intent to end the conversation, "
-            "close the assistant, say goodbye, or stop Jarvis. "
+            "close the assistant, say goodbye, or stop Moses. "
             "The user can say this in ANY language."
         ),
         "parameters": {
@@ -480,9 +480,9 @@ TOOL_DECLARATIONS = [
     },
 ]
 
-class JarvisLive:
+class MosesLive:
 
-    def __init__(self, ui: JarvisUI):
+    def __init__(self, ui: MosesUI):
         self.ui             = ui
         self.session        = None
         self.audio_in_queue = None
@@ -558,7 +558,7 @@ class JarvisLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name="Fenrir"
                     )
                 )
             ),
@@ -568,7 +568,7 @@ class JarvisLive:
         name = fc.name
         args = dict(fc.args or {})
 
-        print(f"[JARVIS] 🔧 {name}  {args}")
+        print(f"[MOSES] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
         if name == "save_memory":
@@ -673,7 +673,7 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
                 result = r or "Done."
 
-            elif name == "shutdown_jarvis":
+            elif name == "shutdown_moses":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("Goodbye, sir.")
                 def _shutdown():
@@ -693,7 +693,7 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+        print(f"[MOSES] 📤 {name} → {str(result)[:80]}")
         return types.FunctionResponse(
             id=fc.id, name=name,
             response={"result": result}
@@ -705,13 +705,13 @@ class JarvisLive:
             await self.session.send_realtime_input(media=msg)
 
     async def _listen_audio(self):
-        print("[JARVIS] 🎤 Mic started")
+        print("[MOSES] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
-                jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted:
+                moses_speaking = self._is_speaking
+            if not moses_speaking and not self.ui.muted:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -726,15 +726,15 @@ class JarvisLive:
                 blocksize=CHUNK_SIZE,
                 callback=callback,
             ):
-                print("[JARVIS] 🎤 Mic stream open")
+                print("[MOSES] 🎤 Mic stream open")
                 while True:
                     await asyncio.sleep(0.1)
         except Exception as e:
-            print(f"[JARVIS] ❌ Mic: {e}")
+            print(f"[MOSES] ❌ Mic: {e}")
             raise
 
     async def _receive_audio(self):
-        print("[JARVIS] 👂 Recv started")
+        print("[MOSES] 👂 Recv started")
         out_buf, in_buf = [], []
 
         try:
@@ -770,25 +770,25 @@ class JarvisLive:
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
-                                self.ui.write_log(f"Jarvis: {full_out}")
+                                self.ui.write_log(f"Moses: {full_out}")
                             out_buf = []
 
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
+                            print(f"[MOSES] 📞 {fc.name}")
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
         except Exception as e:
-            print(f"[JARVIS] ❌ Recv: {e}")
+            print(f"[MOSES] ❌ Recv: {e}")
             traceback.print_exc()
             raise
 
     async def _play_audio(self):
-        print("[JARVIS] 🔊 Play started")
+        print("[MOSES] 🔊 Play started")
 
         stream = sd.RawOutputStream(
             samplerate=RECEIVE_SAMPLE_RATE,
@@ -817,7 +817,7 @@ class JarvisLive:
                 self.set_speaking(True)
                 await asyncio.to_thread(stream.write, chunk)
         except Exception as e:
-            print(f"[JARVIS] ❌ Play: {e}")
+            print(f"[MOSES] ❌ Play: {e}")
             raise
         finally:
             self.set_speaking(False)
@@ -832,7 +832,7 @@ class JarvisLive:
 
         while True:
             try:
-                print("[JARVIS] 🔌 Connecting...")
+                print("[MOSES] 🔌 Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 
@@ -846,9 +846,9 @@ class JarvisLive:
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
 
-                    print("[JARVIS] ✅ Connected.")
+                    print("[MOSES] ✅ Connected.")
                     self.ui.set_state("LISTENING")
-                    self.ui.write_log("SYS: JARVIS online.")
+                    self.ui.write_log("SYS: Moses online.")
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
@@ -856,21 +856,21 @@ class JarvisLive:
                     tg.create_task(self._play_audio())
 
             except Exception as e:
-                print(f"[JARVIS] ⚠️ {e}")
+                print(f"[MOSES] ⚠️ {e}")
                 traceback.print_exc()
             self.set_speaking(False)
             self.ui.set_state("THINKING")
-            print("[JARVIS] 🔄 Reconnecting in 3s...")
+            print("[MOSES] 🔄 Reconnecting in 3s...")
             await asyncio.sleep(3)
 
 def main():
-    ui = JarvisUI("face.png")
+    ui = MosesUI("face.png")
 
     def runner():
         ui.wait_for_api_key()
-        jarvis = JarvisLive(ui)
+        moses = MosesLive(ui)
         try:
-            asyncio.run(jarvis.run())
+            asyncio.run(moses.run())
         except KeyboardInterrupt:
             print("\n🔴 Shutting down...")
 
