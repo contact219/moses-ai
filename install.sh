@@ -30,7 +30,7 @@ sudo apt-get install -y \
     xdotool scrot wmctrl \
     python3-xlib \
     libpulse0 \
-    xclip xdotool \
+    xclip wl-clipboard \
     2>/dev/null
 
 echo -e "${GREEN}  ✓ System packages installed${NC}"
