@@ -736,8 +736,10 @@ class MosesLive:
 
     async def _send_realtime(self):
         while True:
-            msg = await self.out_queue.get()
-            await self.session.send_realtime_input(media=msg)
+            data = await self.out_queue.get()
+            await self.session.send_realtime_input(
+                audio=types.Blob(data=data, mime_type="audio/pcm")
+            )
 
     async def _listen_audio(self):
         print("[MOSES] 🎤 Mic started")
@@ -750,7 +752,7 @@ class MosesLive:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
+                    data
                 )
 
         try:
