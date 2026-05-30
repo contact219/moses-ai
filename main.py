@@ -14,23 +14,45 @@ from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
 )
 
-from actions.file_processor import file_processor
+from actions.file_processor    import file_processor
 from actions.flight_finder     import flight_finder
 from actions.open_app          import open_app
 from actions.weather_report    import weather_action
 from actions.send_message      import send_message
 from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
-from actions.screen_processor  import screen_process
 from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
-from actions.browser_control   import browser_control
 from actions.file_controller   import file_controller
 from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
-from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
+# Heavy modules loaded on first use to speed up startup
+_browser_control_fn  = None
+_screen_process_fn   = None
+_web_search_fn       = None
+
+def _get_browser_control():
+    global _browser_control_fn
+    if _browser_control_fn is None:
+        from actions.browser_control import browser_control
+        _browser_control_fn = browser_control
+    return _browser_control_fn
+
+def _get_screen_process():
+    global _screen_process_fn
+    if _screen_process_fn is None:
+        from actions.screen_processor import screen_process
+        _screen_process_fn = screen_process
+    return _screen_process_fn
+
+def _get_web_search():
+    global _web_search_fn
+    if _web_search_fn is None:
+        from actions.web_search import web_search
+        _web_search_fn = web_search
+    return _web_search_fn
 
 
 def get_base_dir():
@@ -562,6 +584,19 @@ class MosesLive:
                     )
                 )
             ),
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                    prefix_padding_ms=200,
+                    silence_duration_ms=500,
+                ),
+                activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+            ),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                trigger_tokens=8192,
+                sliding_window=types.SlidingWindow(target_tokens=4096),
+            ),
         )
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
@@ -598,7 +633,7 @@ class MosesLive:
                 result = r or "Weather delivered."
 
             elif name == "browser_control":
-                r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: _get_browser_control()(parameters=args, player=self.ui))
                 result = r or "Done."
 
             elif name == "file_controller":
@@ -619,7 +654,7 @@ class MosesLive:
 
             elif name == "screen_process":
                 threading.Thread(
-                    target=screen_process,
+                    target=_get_screen_process(),
                     kwargs={"parameters": args, "response": None,
                             "player": self.ui, "session_memory": None},
                     daemon=True
@@ -650,7 +685,7 @@ class MosesLive:
                 result   = f"Task started (ID: {task_id})."
 
             elif name == "web_search":
-                r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: _get_web_search()(parameters=args, player=self.ui))
                 result = r or "Done."
             elif name == "file_processor":
                 if not args.get("file_path") and self.ui.current_file:
