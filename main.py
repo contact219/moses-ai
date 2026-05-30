@@ -864,7 +864,7 @@ class MosesLive:
             await asyncio.sleep(3)
 
 def main():
-    ui = MosesUI("face.png")
+    ui = MosesUI(str(BASE_DIR / "moses.png"))
 
     def runner():
         ui.wait_for_api_key()
