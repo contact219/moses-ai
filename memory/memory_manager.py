@@ -15,7 +15,7 @@ BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
 _lock            = Lock()
 MAX_VALUE_LENGTH = 380
-MEMORY_MAX_CHARS = 2200
+MEMORY_MAX_CHARS = 6000
 
 def _empty_memory() -> dict:
     return {

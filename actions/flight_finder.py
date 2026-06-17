@@ -62,13 +62,15 @@ def _parse_date(raw: str) -> str:
             return val.strftime("%Y-%m-%d")
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=_get_api_key())
-        model    = genai.GenerativeModel("gemini-2.5-flash-lite")
-        response = model.generate_content(
-            f"Today is {today.strftime('%Y-%m-%d')}. "
-            f"Convert this date expression to YYYY-MM-DD: '{raw}'. "
-            f"Return ONLY the date string, nothing else."
+        from google import genai as _sdk
+        _client  = _sdk.Client(api_key=_get_api_key())
+        response = _client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=(
+                f"Today is {today.strftime('%Y-%m-%d')}. "
+                f"Convert this date expression to YYYY-MM-DD: '{raw}'. "
+                f"Return ONLY the date string, nothing else."
+            ),
         )
         result = response.text.strip()
         if re.match(r"\d{4}-\d{2}-\d{2}", result):
@@ -152,16 +154,14 @@ def _parse_flights_with_gemini(
     destination: str,
     date:        str,
 ) -> list[dict]:
-    import google.generativeai as genai
+    from google import genai as _sdk
+    from google.genai import types as _types
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=(
-            "You are a flight data extraction expert. "
-            "Extract flight information from raw webpage text. "
-            "Return ONLY valid JSON — no markdown, no explanation."
-        ),
+    client = _sdk.Client(api_key=_get_api_key())
+    _si    = (
+        "You are a flight data extraction expert. "
+        "Extract flight information from raw webpage text. "
+        "Return ONLY valid JSON — no markdown, no explanation."
     )
 
     prompt = (
@@ -174,7 +174,11 @@ def _parse_flights_with_gemini(
     )
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=_types.GenerateContentConfig(system_instruction=_si),
+        )
         text     = re.sub(r"```(?:json)?", "", response.text).strip().rstrip("`").strip()
         flights  = json.loads(text)
         return flights if isinstance(flights, list) else []

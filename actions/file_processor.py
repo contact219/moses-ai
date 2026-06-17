@@ -25,7 +25,8 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-import google.generativeai as genai
+from google import genai as _genai_sdk
+from google.genai import types as _genai_types
 
 
 def _get_api_key() -> str:
@@ -34,9 +35,25 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
+class _ModelCompat:
+    """Thin wrapper so existing model.generate_content() call sites work unchanged."""
+    def __init__(self, client, model_name: str, system_instruction: str = None):
+        self._client = client
+        self._model  = model_name
+        self._si     = system_instruction
+
+    def generate_content(self, contents):
+        cfg = _genai_types.GenerateContentConfig(system_instruction=self._si) if self._si else None
+        return self._client.models.generate_content(
+            model=self._model,
+            contents=contents,
+            config=cfg,
+        )
+
+
 def _gemini_client():
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel("gemini-2.5-flash")
+    client = _genai_sdk.Client(api_key=_get_api_key())
+    return _ModelCompat(client, "gemini-2.5-flash")
 
 
 def _detect_type(path: Path) -> str:

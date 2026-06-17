@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 from enum import Enum
 
+from google import genai
+from google.genai import types
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -16,10 +19,10 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
 class ErrorDecision(Enum):
-    RETRY       = "retry"      
-    SKIP        = "skip"       
-    REPLAN      = "replan"     
-    ABORT       = "abort"    
+    RETRY       = "retry"
+    SKIP        = "skip"
+    REPLAN      = "replan"
+    ABORT       = "abort"
 
 
 ERROR_ANALYST_PROMPT = """You are the error recovery module of MARK XXV AI assistant.
@@ -54,32 +57,16 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
+def _client() -> genai.Client:
+    return genai.Client(api_key=_get_api_key())
+
+
 def analyze_error(
     step: dict,
     error: str,
     attempt: int = 1,
     max_attempts: int = 2
 ) -> dict:
-    """
-    Analyzes a failed step and returns a recovery decision.
-
-    Args:
-        step         : The step dict that failed
-        error        : Error message/traceback
-        attempt      : Current attempt number
-        max_attempts : How many times we've already tried
-
-    Returns:
-        {
-            "decision": ErrorDecision,
-            "reason": str,
-            "fix_suggestion": str,
-            "max_retries": int,
-            "user_message": str
-        }
-    """
-    import google.generativeai as genai
-
     if attempt >= max_attempts:
         print(f"[ErrorHandler] ⚠️ Max attempts reached for step {step.get('step')} — forcing replan")
         return {
@@ -90,11 +77,7 @@ def analyze_error(
             "user_message":  "Trying a different approach, sir."
         }
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-lite",
-        system_instruction=ERROR_ANALYST_PROMPT
-    )
+    client = _client()
 
     prompt = f"""Failed step:
 Tool: {step.get('tool')}
@@ -108,9 +91,13 @@ Error:
 Attempt number: {attempt}"""
 
     try:
-        response = model.generate_content(prompt)
-        text     = response.text.strip()
-        text     = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=ERROR_ANALYST_PROMPT),
+        )
+        text = response.text.strip()
+        text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
 
         result = json.loads(text)
         decision_str = result.get("decision", "replan").lower()
@@ -121,7 +108,6 @@ Attempt number: {attempt}"""
             "abort":  ErrorDecision.ABORT,
         }
         result["decision"] = decision_map.get(decision_str, ErrorDecision.REPLAN)
-
 
         if step.get("critical") and result["decision"] == ErrorDecision.SKIP:
             result["decision"]     = ErrorDecision.REPLAN
@@ -142,16 +128,7 @@ Attempt number: {attempt}"""
 
 
 def generate_fix(step: dict, error: str, fix_suggestion: str) -> dict:
-    """
-    When decision is REPLAN and a fix suggestion exists,
-    generates a replacement step using generated_code as fallback.
-
-    Returns a modified step dict.
-    """
-    import google.generativeai as genai
-
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+    client = _client()
 
     prompt = f"""A task step failed. Generate a replacement step.
 
@@ -167,7 +144,10 @@ Write a Python script that accomplishes the same goal differently.
 Return ONLY the Python code, no explanation."""
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
         code = response.text.strip()
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
 

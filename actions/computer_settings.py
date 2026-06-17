@@ -570,9 +570,13 @@ _DANGEROUS_ACTIONS = {"restart", "shutdown"}
 
 def _detect_action(description: str) -> dict:
 
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    from google import genai as _sdk
+    from google.genai import types as _types
+    _client = _sdk.Client(api_key=_get_api_key())
+    class _M:
+        def generate_content(self, p):
+            return _client.models.generate_content(model="gemini-2.5-flash-lite", contents=p)
+    model = _M()
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
                 ", volume_set, type_text, press_key, reload_n"

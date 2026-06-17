@@ -3,6 +3,9 @@ import re
 import sys
 from pathlib import Path
 
+from google import genai
+from google.genai import types
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -171,23 +174,25 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
-def create_plan(goal: str, context: str = "") -> dict:
-    import google.generativeai as genai
+def _client() -> genai.Client:
+    return genai.Client(api_key=_get_api_key())
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-lite",
-        system_instruction=PLANNER_PROMPT
-    )
+
+def create_plan(goal: str, context: str = "") -> dict:
+    client = _client()
 
     user_input = f"Goal: {goal}"
     if context:
         user_input += f"\n\nContext: {context}"
 
     try:
-        response = model.generate_content(user_input)
-        text     = response.text.strip()
-        text     = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=user_input,
+            config=types.GenerateContentConfig(system_instruction=PLANNER_PROMPT),
+        )
+        text = response.text.strip()
+        text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
 
         plan = json.loads(text)
 
@@ -232,13 +237,7 @@ def _fallback_plan(goal: str) -> dict:
 
 
 def replan(goal: str, completed_steps: list, failed_step: dict, error: str) -> dict:
-    import google.generativeai as genai
-
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=PLANNER_PROMPT
-    )
+    client = _client()
 
     completed_summary = "\n".join(
         f"  - Step {s['step']} ({s['tool']}): DONE" for s in completed_steps
@@ -255,10 +254,14 @@ Error: {error}
 Create a REVISED plan for the remaining work only. Do not repeat completed steps."""
 
     try:
-        response = model.generate_content(prompt)
-        text     = response.text.strip()
-        text     = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
-        plan     = json.loads(text)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=PLANNER_PROMPT),
+        )
+        text = response.text.strip()
+        text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
+        plan = json.loads(text)
 
         for step in plan.get("steps", []):
             if step.get("tool") == "generated_code":

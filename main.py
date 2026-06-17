@@ -580,7 +580,7 @@ class MosesLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Orus"
+                        voice_name="Charon"
                     )
                 )
             ),
@@ -589,13 +589,13 @@ class MosesLive:
                     start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
                     end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
                     prefix_padding_ms=200,
-                    silence_duration_ms=500,
+                    silence_duration_ms=300,
                 ),
                 activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
             ),
             context_window_compression=types.ContextWindowCompressionConfig(
-                trigger_tokens=8192,
-                sliding_window=types.SlidingWindow(target_tokens=4096),
+                trigger_tokens=24576,
+                sliding_window=types.SlidingWindow(target_tokens=12000),
             ),
         )
 
