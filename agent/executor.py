@@ -13,6 +13,7 @@ from google.genai import types
 
 from agent.planner       import create_plan, replan
 from agent.error_handler import analyze_error, generate_fix, ErrorDecision
+from core.persona        import get_client, get_api_key as _get_api_key, VOICE_STYLE
 
 
 def get_base_dir() -> Path:
@@ -25,13 +26,31 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+# Patterns that could irreversibly damage the machine. Generated code containing
+# any of these is refused before it ever runs — Moses builds, he doesn't nuke.
+_DESTRUCTIVE_PATTERNS = [
+    r"rm\s+-rf\s+[/~]",              # rm -rf / or ~
+    r"shutil\.rmtree\(\s*['\"]?[/~]",  # rmtree of a root/home path
+    r"\bmkfs\b", r"\bfdisk\b", r"\bdd\s+if=",
+    r">\s*/dev/sd[a-z]",
+    r":\(\)\s*\{",                  # fork bomb
+    r"os\.system\(\s*['\"]\s*rm\s+-rf",
+    r"format\s+[a-z]:",             # windows format
+    r"subprocess.*shutdown", r"\bsudo\b\s+rm",
+]
+
+
+def _looks_destructive(code: str) -> str | None:
+    low = code.lower()
+    for pat in _DESTRUCTIVE_PATTERNS:
+        if re.search(pat, low):
+            return pat
+    return None
+
 
 def _run_generated_code(description: str, speak: Callable | None = None) -> str:
     if speak:
-        speak("Writing custom code for this task, sir.")
+        speak("Writing some custom code for this one.")
 
     home      = Path.home()
     desktop   = home / "Desktop"
@@ -47,7 +66,7 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         except Exception:
             pass
 
-    client = genai.Client(api_key=_get_api_key())
+    client = get_client()
     system_instruction = (
         "You are an expert Python developer. "
         "Write clean, complete, working Python code. "
@@ -69,6 +88,14 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         )
         code = response.text.strip()
         code = re.sub(r"```(?:python)?", "", code).strip().rstrip("`").strip()
+
+        danger = _looks_destructive(code)
+        if danger:
+            print(f"[Executor] ⛔ Refused destructive code (matched {danger!r})")
+            raise RuntimeError(
+                "That would need a destructive system operation, so I'm not running it. "
+                "Ask me to do it a safer way if you really need it."
+            )
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False, encoding="utf-8"
@@ -107,6 +134,25 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
     except Exception as e:
         raise RuntimeError(f"Generated code failed: {e}")
 
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*step\s*(\d+)\s*\}\}", re.IGNORECASE)
+
+
+def _resolve_placeholders(value, step_results: dict):
+    """Replace {{stepN}} references anywhere in a param structure with that
+    step's result. Walks strings, dicts and lists recursively."""
+    if isinstance(value, str):
+        def _sub(m):
+            n = int(m.group(1))
+            res = step_results.get(n, step_results.get(str(n)))
+            return str(res) if res is not None else m.group(0)
+        return _PLACEHOLDER_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _resolve_placeholders(v, step_results) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_placeholders(v, step_results) for v in value]
+    return value
+
+
 def _inject_context(params: dict, tool: str, step_results: dict, goal: str = "") -> dict:
     if not step_results:
         return params
@@ -128,7 +174,7 @@ def _inject_context(params: dict, tool: str, step_results: dict, goal: str = "")
 
     return params
 def _detect_language(text: str) -> str:
-    client = genai.Client(api_key=_get_api_key())
+    client = get_client()
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash-lite",
@@ -147,7 +193,7 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
     if not goal:
         return content
     try:
-        client = genai.Client(api_key=_get_api_key())
+        client = get_client()
         target_lang = _detect_language(goal)
         print(f"[Executor] 🌐 Translating to: {target_lang}")
 
@@ -268,7 +314,7 @@ class AgentExecutor:
             steps = plan.get("steps", [])
 
             if not steps:
-                msg = "I couldn't create a valid plan for this task, sir."
+                msg = "I couldn't map out a way to do that one."
                 if speak: speak(msg)
                 return msg
 
@@ -278,7 +324,7 @@ class AgentExecutor:
 
             for step in steps:
                 if cancel_flag and cancel_flag.is_set():
-                    if speak: speak("Task cancelled, sir.")
+                    if speak: speak("Cancelled that one.")
                     return "Task cancelled."
 
                 step_num = step.get("step", "?")
@@ -286,6 +332,7 @@ class AgentExecutor:
                 desc     = step.get("description", "")
                 params   = step.get("parameters", {})
 
+                params = _resolve_placeholders(params, step_results)
                 params = _inject_context(params, tool, step_results, goal=goal)
 
                 print(f"\n[Executor] ▶️ Step {step_num}: [{tool}] {desc}")
@@ -327,16 +374,16 @@ class AgentExecutor:
                             break
 
                         elif decision == ErrorDecision.ABORT:
-                            msg = f"Task aborted, sir. {recovery.get('reason', '')}"
+                            msg = f"Had to stop on this one. {recovery.get('reason', '')}".strip()
                             if speak: speak(msg)
                             return msg
 
-                        else: 
+                        else:
                             fix_suggestion = recovery.get("fix_suggestion", "")
                             if fix_suggestion and tool != "generated_code":
                                 try:
                                     fixed_step = generate_fix(step, error_msg, fix_suggestion)
-                                    if speak: speak("Trying an alternative approach, sir.")
+                                    if speak: speak("Let me try this another way.")
                                     res = _call_tool(
                                         fixed_step["tool"],
                                         fixed_step["parameters"],
@@ -366,33 +413,42 @@ class AgentExecutor:
                 return self._summarize(goal, completed_steps, speak)
 
             if replan_attempts >= self.MAX_REPLAN_ATTEMPTS:
-                msg = f"Task failed after {replan_attempts} replan attempts, sir."
+                msg = "I couldn't get that one across the line, even after switching it up."
                 if speak: speak(msg)
                 return msg
 
-            if speak: speak("Adjusting my approach, sir.")
+            if speak: speak("Let me switch up my approach.")
 
             replan_attempts += 1
             plan = replan(goal, completed_steps, failed_step, failed_error)
 
     def _summarize(self, goal: str, completed_steps: list, speak: Callable | None) -> str:
-        fallback = f"All done, sir. Completed {len(completed_steps)} steps for: {goal[:60]}."
+        fallback = f"Handled it — {len(completed_steps)} steps done for: {goal[:60]}."
         try:
-            client    = genai.Client(api_key=_get_api_key())
+            client    = get_client()
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'
                 f"Completed steps:\n{steps_str}\n\n"
-                "Write a single natural sentence summarizing what was accomplished. "
-                "Address the user as 'sir'. Be direct and positive."
+                "Write a single natural sentence telling the user what got done.\n"
+                f"{VOICE_STYLE}"
             )
             response = client.models.generate_content(
                 model="gemini-2.5-flash-lite",
                 contents=prompt,
             )
             summary  = response.text.strip()
+            self._remember(goal, summary)
             if speak: speak(summary)
             return summary
         except Exception:
             if speak: speak(fallback)
             return fallback
+
+    @staticmethod
+    def _remember(goal: str, summary: str) -> None:
+        try:
+            from memory.memory_manager import record_episode
+            record_episode(f"Completed a task: {goal[:120]} — {summary[:200]}")
+        except Exception as e:
+            print(f"[Executor] ⚠️ Could not record episode: {e}")

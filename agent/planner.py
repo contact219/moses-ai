@@ -17,15 +17,23 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-PLANNER_PROMPT = """You are the planning module of MARK XXV, a personal AI assistant.
+PLANNER_PROMPT = """You are the planning module of Moses, a personal AI assistant.
 Your job: break any user goal into a sequence of steps using ONLY the tools listed below.
 
 ABSOLUTE RULES:
 - NEVER use generated_code or write Python scripts. It does not exist.
-- NEVER reference previous step results in parameters. Every step is independent.
 - Use web_search for ANY information retrieval, research, or current data.
 - Use file_controller to save content to disk.
 - Max 5 steps. Use the minimum steps needed.
+
+PASSING DATA BETWEEN STEPS:
+- A later step can use the result of an earlier step with the placeholder {{stepN}},
+  where N is that step's number. Example: {{step1}} is replaced with step 1's output.
+- Use this whenever one step produces content another step needs — e.g. search, then
+  save the findings to a file, or search then message someone the answer.
+- Only reference steps that come BEFORE the current one. If a step needs no prior data,
+  do not add placeholders.
+- Example content field: "content": "Research notes:\\n\\n{{step1}}\\n\\n{{step2}}"
 
 AVAILABLE TOOLS AND THEIR PARAMETERS:
 
@@ -120,7 +128,7 @@ Steps:
 
 web_search | query: "mechanical engineering overview definition history"
 web_search | query: "mechanical engineering applications and future trends"
-file_controller | action: write, path: desktop, name: mechanical_engineering.txt, content: "MECHANICAL ENGINEERING RESEARCH\n\nThis file will be filled with web research results."
+file_controller | action: write, path: desktop, name: mechanical_engineering.txt, content: "MECHANICAL ENGINEERING RESEARCH\n\n{{step1}}\n\n{{step2}}"
 
 Goal: "What is the price of Bitcoin"
 Steps:
@@ -169,13 +177,7 @@ OUTPUT — return ONLY valid JSON, no markdown, no explanation, no code blocks:
 """
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _client() -> genai.Client:
-    return genai.Client(api_key=_get_api_key())
+from core.persona import get_client as _client, get_api_key as _get_api_key
 
 
 def create_plan(goal: str, context: str = "") -> dict:

@@ -46,6 +46,22 @@ def load_api_keys() -> dict:
 def get_gemini_key() -> str | None:
     return load_api_keys().get("gemini_api_key")
 
+
+def get_config_value(key: str, default=None):
+    return load_api_keys().get(key, default)
+
+
+def set_config_value(key: str, value) -> None:
+    ensure_config_dir()
+    data: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data[key] = value
+    CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
 def is_configured() -> bool:
     key = get_gemini_key()
     return bool(key and len(key) > 15)

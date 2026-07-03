@@ -12,6 +12,7 @@ from google.genai import types
 from ui import MosesUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
+    format_episodes_for_prompt, record_episode, recall_relevant,
 )
 
 from actions.file_processor    import file_processor
@@ -64,7 +65,7 @@ def get_base_dir():
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
-LIVE_MODEL          = "models/gemini-3.1-flash-live-preview"
+LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-latest"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -500,6 +501,75 @@ TOOL_DECLARATIONS = [
             "required": ["category", "key", "value"]
         }
     },
+    {
+        "name": "recall_memory",
+        "description": (
+            "Search your memory of this person — both stable facts and past sessions — "
+            "for anything relevant to a topic. Call this silently when the user refers to "
+            "something from before ('that trip', 'the thing I told you', 'my project') and "
+            "you need to remember the specifics before answering. Returns matching notes."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "What to look up (e.g. 'Houston flight', 'sister', 'the game project')"},
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "document_search",
+        "description": (
+            "Search the user's own files (Documents, Desktop, Downloads) to answer a "
+            "question about their content. Use when the user references something in "
+            "their files — 'what did that contract say', 'find the invoice total', "
+            "'summarize my notes on X'. Returns an answer grounded in their documents."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "The question to answer from the user's files"},
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "vision_act",
+        "description": (
+            "Look at the screen and actually operate the computer to accomplish a visual "
+            "goal, step by step (see, act, re-check). Use for GUI tasks that need eyes — "
+            "'click the blue login button', 'fill this form and submit', 'close every open tab'. "
+            "For a single blind keypress or a known app, use computer_control instead."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "goal": {"type": "STRING", "description": "What to accomplish on screen"},
+            },
+            "required": ["goal"]
+        }
+    },
+    {
+        "name": "devices",
+        "description": (
+            "List or select the microphones, speakers, and webcams attached to the system. "
+            "Use when the user asks what devices are connected, or wants to switch input/output — "
+            "'what mics do I have', 'use my USB webcam', 'switch to my headphones', 'use the Blue Yeti'. "
+            "Audio changes apply on the next reconnect; camera changes apply immediately."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "list | set_microphone | set_speaker | set_camera | reset"
+                },
+                "name":  {"type": "STRING", "description": "Device name (or part of it) to select, e.g. 'Yeti', 'HDMI'"},
+                "index": {"type": "STRING", "description": "Device index number to select, if known"},
+            },
+            "required": ["action"]
+        }
+    },
 ]
 
 class MosesLive:
@@ -514,6 +584,9 @@ class MosesLive:
         self._speaking_lock = threading.Lock()
         self.ui.on_text_command = self._on_text_command
         self._turn_done_event: asyncio.Event | None = None
+        self._turn_log: list[str] = []      # rolling conversation buffer for episodic memory
+        self._episode_lock = threading.Lock()
+        self.ui.vision_active = False       # true while the vision session is speaking
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -548,13 +621,48 @@ class MosesLive:
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
         self.ui.write_log(f"ERR: {tool_name} — {short}")
-        self.speak(f"Sir, {tool_name} encountered an error. {short}")
+        self.speak(f"Ran into a snag with {tool_name}. {short}")
+
+    def _log_turn(self, user_text: str, moses_text: str):
+        """Buffer a completed exchange; distil to an episode every few turns."""
+        if user_text:
+            self._turn_log.append(f"User: {user_text}")
+        if moses_text:
+            self._turn_log.append(f"Moses: {moses_text}")
+        if len([t for t in self._turn_log if t.startswith("User:")]) >= 5:
+            batch = self._turn_log
+            self._turn_log = []
+            threading.Thread(
+                target=self._distil_episode, args=(batch,), daemon=True
+            ).start()
+
+    def _distil_episode(self, turns: list[str]):
+        """Summarize a batch of turns into one durable episodic memory line."""
+        with self._episode_lock:
+            try:
+                from core.persona import get_client
+                convo = "\n".join(turns)[:4000]
+                resp  = get_client().models.generate_content(
+                    model="gemini-2.5-flash-lite",
+                    contents=(
+                        "Summarize this conversation slice into ONE past-tense sentence "
+                        "capturing what the user did, asked, or shared that's worth "
+                        "remembering next time. If nothing is worth keeping, reply NONE.\n\n"
+                        f"{convo}"
+                    ),
+                )
+                summary = (resp.text or "").strip()
+                if summary and summary.upper() != "NONE":
+                    record_episode(summary)
+            except Exception as e:
+                print(f"[MOSES] ⚠️ Episode distil failed: {e}")
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
+        episodes   = format_episodes_for_prompt()
         sys_prompt = _load_system_prompt()
 
         now      = datetime.now()
@@ -568,6 +676,8 @@ class MosesLive:
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
+        if episodes:
+            parts.append(episodes)
         parts.append(sys_prompt)
 
         return types.LiveConnectConfig(
@@ -618,6 +728,15 @@ class MosesLive:
             return types.FunctionResponse(
                 id=fc.id, name=name,
                 response={"result": "ok", "silent": True}
+            )
+
+        if name == "recall_memory":
+            hits = recall_relevant(args.get("query", ""))
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": hits or "Nothing on that in memory yet.", "silent": True}
             )
 
         loop   = asyncio.get_event_loop()
@@ -700,6 +819,21 @@ class MosesLive:
                 r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name == "document_search":
+                from actions.document_search import document_search
+                r = await loop.run_in_executor(None, lambda: document_search(parameters=args, player=self.ui, speak=self.speak))
+                result = r or "Done."
+
+            elif name == "vision_act":
+                from actions.vision_act import vision_act
+                r = await loop.run_in_executor(None, lambda: vision_act(parameters=args, player=self.ui, speak=self.speak))
+                result = r or "Done."
+
+            elif name == "devices":
+                from actions.devices import devices as devices_action
+                r = await loop.run_in_executor(None, lambda: devices_action(parameters=args, player=self.ui, speak=self.speak))
+                result = r or "Done."
+
             elif name == "game_updater":
                 r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, player=self.ui, speak=self.speak))
                 result = r or "Done."
@@ -710,7 +844,7 @@ class MosesLive:
 
             elif name == "shutdown_moses":
                 self.ui.write_log("SYS: Shutdown requested.")
-                self.speak("Goodbye, sir.")
+                self.speak("Aight, I'm out. Catch you later.")
                 def _shutdown():
                     import time, os
                     time.sleep(1)
@@ -734,6 +868,22 @@ class MosesLive:
             response={"result": result}
         )
 
+    async def _proactive_loop(self):
+        """Every 30s, check if Moses should bring something up on his own."""
+        from actions.proactive import due_nudges
+        while True:
+            await asyncio.sleep(30)
+            try:
+                # Don't cut in while he (or vision) is already talking.
+                if self._is_speaking or getattr(self.ui, "vision_active", False) or self.ui.muted:
+                    continue
+                for line in due_nudges():
+                    self.ui.write_log(f"Moses (proactive): {line}")
+                    self.speak(line)
+                    await asyncio.sleep(4)
+            except Exception as e:
+                print(f"[MOSES] ⚠️ Proactive loop: {e}")
+
     async def _send_realtime(self):
         while True:
             data = await self.out_queue.get()
@@ -748,7 +898,8 @@ class MosesLive:
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 moses_speaking = self._is_speaking
-            if not moses_speaking and not self.ui.muted:
+            vision_speaking = getattr(self.ui, "vision_active", False)
+            if not moses_speaking and not vision_speaking and not self.ui.muted:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -756,11 +907,16 @@ class MosesLive:
                 )
 
         try:
+            from actions.devices import get_audio_device
+            mic_device = get_audio_device("input")
+            if mic_device is not None:
+                print(f"[MOSES] 🎤 Using configured mic device {mic_device}")
             with sd.InputStream(
                 samplerate=SEND_SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype="int16",
                 blocksize=CHUNK_SIZE,
+                device=mic_device,
                 callback=callback,
             ):
                 print("[MOSES] 🎤 Mic stream open")
@@ -810,6 +966,9 @@ class MosesLive:
                                 self.ui.write_log(f"Moses: {full_out}")
                             out_buf = []
 
+                            if full_in or full_out:
+                                self._log_turn(full_in, full_out)
+
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
@@ -827,11 +986,16 @@ class MosesLive:
     async def _play_audio(self):
         print("[MOSES] 🔊 Play started")
 
+        from actions.devices import get_audio_device
+        spk_device = get_audio_device("output")
+        if spk_device is not None:
+            print(f"[MOSES] 🔊 Using configured speaker device {spk_device}")
         stream = sd.RawOutputStream(
             samplerate=RECEIVE_SAMPLE_RATE,
             channels=CHANNELS,
             dtype="int16",
             blocksize=CHUNK_SIZE,
+            device=spk_device,
         )
         stream.start()
 
@@ -891,6 +1055,7 @@ class MosesLive:
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
+                    tg.create_task(self._proactive_loop())
 
             except Exception as e:
                 print(f"[MOSES] ⚠️ {e}")

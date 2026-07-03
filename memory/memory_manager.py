@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from threading import Lock
 from pathlib import Path
@@ -13,9 +14,12 @@ def get_base_dir() -> Path:
 
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
+EPISODES_PATH    = BASE_DIR / "memory" / "episodes.json"
 _lock            = Lock()
+_ep_lock         = Lock()
 MAX_VALUE_LENGTH = 380
 MEMORY_MAX_CHARS = 6000
+MAX_EPISODES     = 60      # keep the most recent N session memories
 
 def _empty_memory() -> dict:
     return {
@@ -213,3 +217,98 @@ def forget(key: str, category: str = "notes") -> str:
 
 
 forget_memory = forget
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# EPISODIC MEMORY — what actually happened, session by session.
+# Long-term memory stores stable facts ("their dog is named Kobe"). Episodes
+# store events ("last time we booked a flight to Houston"), so Moses can check
+# in on things across sessions the way the persona promises.
+# ───────────────────────────────────────────────────────────────────────────
+
+def load_episodes() -> list:
+    if not EPISODES_PATH.exists():
+        return []
+    with _ep_lock:
+        try:
+            data = json.loads(EPISODES_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            print(f"[Memory] ⚠️ Episode load error: {e}")
+            return []
+
+
+def record_episode(summary: str, tags: list | None = None) -> None:
+    """Append one event to episodic memory (keeps only the most recent N)."""
+    summary = (summary or "").strip()
+    if not summary:
+        return
+    now = datetime.now()
+    episode = {
+        "date":    now.strftime("%Y-%m-%d"),
+        "time":    now.strftime("%H:%M"),
+        "summary": summary[:400],
+        "tags":    [t.lower() for t in (tags or []) if t],
+    }
+    with _ep_lock:
+        try:
+            episodes = json.loads(EPISODES_PATH.read_text(encoding="utf-8")) \
+                if EPISODES_PATH.exists() else []
+            if not isinstance(episodes, list):
+                episodes = []
+        except Exception:
+            episodes = []
+        episodes.append(episode)
+        episodes = episodes[-MAX_EPISODES:]
+        EPISODES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        EPISODES_PATH.write_text(
+            json.dumps(episodes, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    print(f"[Memory] 📓 Episode saved: {summary[:60]}")
+
+
+def format_episodes_for_prompt(n: int = 8) -> str:
+    episodes = load_episodes()
+    if not episodes:
+        return ""
+    lines = ["[RECENT HISTORY — things you did with them lately, reference naturally]"]
+    for ep in episodes[-n:]:
+        lines.append(f"  - {ep.get('date', '?')}: {ep.get('summary', '')}")
+    return "\n".join(lines) + "\n"
+
+
+_WORD_RE = re.compile(r"[a-z0-9]{3,}")
+_STOP = {"the", "and", "for", "you", "your", "what", "with", "that", "this", "was",
+         "are", "have", "how", "who", "when", "where", "did", "does", "can", "about"}
+
+
+def _keywords(text: str) -> set:
+    return {w for w in _WORD_RE.findall((text or "").lower()) if w not in _STOP}
+
+
+def recall_relevant(query: str, k: int = 5) -> str:
+    """Dependency-free relevance search over long-term facts + episodes.
+    Scores entries by keyword overlap with the query and returns the top k."""
+    q = _keywords(query)
+    if not q:
+        return ""
+
+    scored = []
+
+    for cat, key, entry in _all_entries(load_memory()):
+        val = entry.get("value", "")
+        overlap = len(q & _keywords(f"{key} {val}"))
+        if overlap:
+            scored.append((overlap, f"{key.replace('_', ' ')}: {val}"))
+
+    for ep in load_episodes():
+        overlap = len(q & _keywords(ep.get("summary", "") + " " + " ".join(ep.get("tags", []))))
+        if overlap:
+            scored.append((overlap, f"({ep.get('date', '?')}) {ep.get('summary', '')}"))
+
+    if not scored:
+        return ""
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    top = [text for _, text in scored[:k]]
+    return "\n".join(f"- {t}" for t in top)

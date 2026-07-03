@@ -86,9 +86,19 @@ _SYSTEM_PROMPT = (
     "Analyze the provided image with precision and intelligence. "
     "Be concise and direct — maximum two sentences unless the user's question "
     "requires more detail. "
-    "Address the user respectfully. "
+    "Speak warm and direct, like yourself. Never say 'sir'. "
     "Always call the appropriate tool; never simulate results."
 )
+
+
+def _set_vision_active(player, active: bool) -> None:
+    """Signal the main session to hold its mic while the vision voice is talking,
+    so Moses doesn't hear (and react to) his own vision output."""
+    if player is not None:
+        try:
+            player.vision_active = active
+        except Exception:
+            pass
 
 
 def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]:
@@ -324,6 +334,7 @@ class _VisionSession:
         try:
             async for response in self._session.receive():
                 if response.data:
+                    _set_vision_active(self._player, True)
                     await self._audio_in.put(response.data)
 
                 sc = response.server_content
@@ -348,21 +359,35 @@ class _VisionSession:
             raise  
 
     async def _play_loop(self) -> None:
+        try:
+            from actions.devices import get_audio_device
+            _spk = get_audio_device("output")
+        except Exception:
+            _spk = None
         stream = sd.RawOutputStream(
             samplerate=_RECEIVE_SAMPLE_RATE,
             channels=_CHANNELS,
             dtype="int16",
             blocksize=_CHUNK_SIZE,
+            device=_spk,
         )
         stream.start()
         try:
             while True:
-                chunk = await self._audio_in.get()
+                try:
+                    chunk = await asyncio.wait_for(self._audio_in.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    # No audio for a beat and nothing queued → vision is done talking,
+                    # release the main mic.
+                    if self._audio_in.empty():
+                        _set_vision_active(self._player, False)
+                    continue
                 await asyncio.to_thread(stream.write, chunk)
         except Exception as e:
             print(f"[Vision] ❌ Play error: {e}")
             raise
         finally:
+            _set_vision_active(self._player, False)
             stream.stop()
             stream.close()
 

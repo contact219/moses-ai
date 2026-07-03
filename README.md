@@ -16,7 +16,10 @@ A voice-activated AI desktop assistant powered by **Google Gemini Live**. Moses 
 - ☁️ **Weather, flights, reminders**
 - 💻 **Code helper & dev agent** — writes, runs, and fixes code
 - 📸 **Screen vision** — analyzes what's on screen or webcam
-- 🧠 **Long-term memory** — remembers your preferences across sessions
+- 👁 **Vision-driven control** — sees the screen and operates the GUI step by step
+- 📂 **Document search** — answers questions from your own files (Documents/Desktop/Downloads)
+- 🧠 **Long-term + episodic memory** — remembers your preferences *and* what you did together, and recalls it on topic
+- 🔔 **Proactive** — gives spoken heads-ups before your reminders in his own voice
 - 🎮 **Game updater** — Steam & Epic Games
 
 ---
@@ -181,7 +184,20 @@ moses-ai/
 | `Moses, write me a Python script that...` | Generates and saves code |
 | `Moses, what's the weather in Houston?` | Opens weather search |
 | `Moses, take a screenshot` | Screenshots desktop |
+| `Moses, what did that invoice say about the total?` | Searches your own files (document search) |
+| `Moses, log into the site on screen for me` | Sees the screen and drives the GUI (vision-act) |
+| `Moses, what mics and cameras do I have?` | Lists attached audio + camera devices |
+| `Moses, switch to my USB webcam` / `use my headphones` | Selects the input/output/camera device |
+| `Moses, what was that thing I told you about my trip?` | Recalls from long-term + episodic memory |
 | `Moses, goodbye` | Shuts down |
+
+### What's new under the hood
+
+- **One voice everywhere.** The task/agent layer now speaks as Moses (no more "sir"); the planner/executor share a single identity and a cached Gemini client.
+- **Multi-step tasks pass data.** Plan steps can reference earlier results with `{{stepN}}` — e.g. research, then write the findings to a file for real.
+- **Episodic memory** (`memory/episodes.json`) records what you did together; `recall_memory` searches it on demand.
+- **Proactive nudges** — reminders now also come through Moses's own voice, with a heads-up beforehand.
+- **Safety** — generated code is screened for destructive operations before it ever runs; the vision voice no longer feeds back into the mic.
 
 ---
 

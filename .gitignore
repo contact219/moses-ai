@@ -14,6 +14,10 @@ config/api_keys.json
 
 # Personal memory — generated at runtime, not shared
 memory/long_term.json
+memory/episodes.json
+
+# Runtime artifacts
+screenshot.png
 
 # Large binary / driver files
 *.run
