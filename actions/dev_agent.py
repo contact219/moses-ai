@@ -5,36 +5,17 @@ import re
 import time
 from pathlib import Path
 
+from core.claude_client import get_code_model, is_rate_limit as _is_claude_rate_limit
 
-def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-
-BASE_DIR         = get_base_dir()
-API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "MosesProjects"
 MAX_FIX_ATTEMPTS = 5
-MODEL_PLANNER    = "gemini-2.5-flash"
-MODEL_WRITER     = "gemini-2.5-flash"
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
 
 
-def _get_model(model_name: str):
-    from google import genai as _sdk
-
-    class _Compat:
-        def __init__(self, client, name):
-            self._client = client
-            self._model  = name
-        def generate_content(self, contents):
-            return self._client.models.generate_content(model=self._model, contents=contents)
-
-    return _Compat(_sdk.Client(api_key=_get_api_key()), model_name)
+def _get_model(model_name: str = None):
+    # model_name kept for call-site compatibility — Claude Opus 4.8 handles
+    # both the planning and writing roles that used to be split across
+    # separate Gemini models.
+    return get_code_model()
 
 
 def _strip_fences(text: str) -> str:
@@ -45,6 +26,8 @@ def _strip_fences(text: str) -> str:
 
 
 def _is_rate_limit(error: Exception) -> bool:
+    if _is_claude_rate_limit(error):
+        return True
     msg = str(error).lower()
     return "429" in msg or "quota" in msg or "resource_exhausted" in msg
 
@@ -104,7 +87,7 @@ class RateLimitError(Exception):
 
 
 def _plan_project(description: str, language: str) -> dict:
-    model = _get_model(MODEL_PLANNER)
+    model = _get_model()
 
     prompt = f"""You are a senior software architect. Create a minimal, complete file plan for this project.
 
@@ -160,7 +143,7 @@ def _write_file(
     project_dir: Path,
     already_written: dict[str, str],
 ) -> str:
-    model = _get_model(MODEL_WRITER)
+    model = _get_model()
 
     file_path = file_info["path"]
     file_desc = file_info.get("description", "")
@@ -357,7 +340,7 @@ def _fix_files(
     entry_point: str,
 ) -> dict[str, str]:
 
-    model = _get_model(MODEL_PLANNER)
+    model = _get_model()
 
     error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()))
     error_type = _classify_error(error_output)

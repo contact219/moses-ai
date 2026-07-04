@@ -10,6 +10,7 @@ import sounddevice as sd
 from google import genai
 from google.genai import types
 from ui import MosesUI
+from core.text_utils import strip_markdown_for_speech
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     format_episodes_for_prompt, record_episode, recall_relevant,
@@ -610,6 +611,7 @@ class MosesLive:
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
+        text = strip_markdown_for_speech(text)
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},

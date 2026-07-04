@@ -1,40 +1,13 @@
 import subprocess
 import sys
-import json
 import re
 import time
 from pathlib import Path
 
+from core.claude_client import get_code_model, analyze_image
 
-def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-BASE_DIR           = get_base_dir()
-API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
 DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
-GEMINI_MODEL       = "gemini-2.5-flash"
-
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _get_gemini(model: str = GEMINI_MODEL):
-    from google import genai as _sdk
-    from google.genai import types as _types
-
-    class _Compat:
-        def __init__(self, client, model_name):
-            self._client = client
-            self._model  = model_name
-        def generate_content(self, contents):
-            return self._client.models.generate_content(model=self._model, contents=contents)
-
-    return _Compat(_sdk.Client(api_key=_get_api_key()), model)
 
 
 def _clean_code(text: str) -> str:
@@ -108,11 +81,6 @@ def _take_screenshot() -> Path | None:
         return None
 
 
-def _image_to_base64(path: Path) -> str:
-    import base64
-    return base64.b64encode(path.read_bytes()).decode("utf-8")
-
-
 def _detect_intent(description: str, file_path: str, code: str) -> str:
     desc = (description or "").lower()
 
@@ -154,7 +122,7 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
 
 def _write(description: str, language: str, output_path: str, player=None) -> tuple[str, Path]:
     lang  = language or "python"
-    model = _get_gemini()
+    model = get_code_model()
 
     prompt = f"""You are an expert {lang} developer.
 Write clean, working, well-commented {lang} code for the description below.
@@ -177,7 +145,7 @@ Code:"""
 
 
 def _fix_code(code: str, error_output: str, description: str) -> str:
-    model  = _get_gemini()
+    model  = get_code_model()
     prompt = f"""You are an expert debugger.
 The code below failed with the following error. Fix it.
 Return ONLY the corrected code — no explanation, no markdown, no backticks.
@@ -311,7 +279,7 @@ def _edit_action(file_path, instruction, player) -> str:
     if player:
         player.write_log("[Code] Editing file...")
 
-    model  = _get_gemini()
+    model  = get_code_model()
     prompt = f"""You are an expert code editor.
 Apply the following change to the code below.
 Return ONLY the complete updated code — no explanation, no markdown, no backticks.
@@ -345,7 +313,6 @@ def _explain_action(file_path, code, player) -> str:
     if player:
         player.write_log("[Code] Analyzing code...")
 
-    model  = _get_gemini()
     prompt = f"""Explain what this code does in simple, clear language.
 Focus on: what it does, how it works, and any important details.
 Be concise — 3 to 6 sentences maximum.
@@ -355,8 +322,16 @@ Code:
 
 Explanation:"""
 
+    # Read-only, no side effects, nothing saved — a quick Gemini call is plenty
+    # for this and keeps "explain this" feeling instant. Claude is reserved for
+    # the actions where deeper reasoning actually changes the output quality
+    # (write / edit / optimize / build / dev_agent).
     try:
-        response = model.generate_content(prompt)
+        from core.persona import get_client
+        response = get_client().models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
         return response.text.strip()
     except Exception as e:
         return f"Could not explain code: {e}"
@@ -386,7 +361,7 @@ def _optimize_action(file_path, code, language, output_path, player) -> str:
         player.write_log("[Code] Optimizing code...")
 
     lang  = language or "python"
-    model = _get_gemini()
+    model = get_code_model()
 
     prompt = f"""You are an expert {lang} developer and code reviewer.
 Optimize the following code for:
@@ -449,13 +424,7 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
             print(f"[Code] ⚠️ Could not read file: {err}")
 
     try:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(api_key=_get_api_key())
-
-        image_bytes  = screenshot_path.read_bytes()
-        image_base64 = _image_to_base64(screenshot_path)
+        image_bytes = screenshot_path.read_bytes()
 
         user_question = description or "What error or problem do you see on the screen? How can it be fixed?"
 
@@ -475,17 +444,7 @@ Please:
 
 Be specific and actionable. If you see an error message, quote it exactly."""
 
-        contents = [
-            types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-            analysis_prompt,
-        ]
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-        )
-
-        analysis = response.text.strip()
+        analysis = analyze_image(image_bytes, analysis_prompt)
         print(f"[Code] ✅ Screen analysis complete")
 
         try:
