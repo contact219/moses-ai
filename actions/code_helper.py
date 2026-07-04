@@ -436,13 +436,18 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
 
 User's question: {user_question}{context}
 
-Please:
-1. Identify any errors, exceptions, or problems visible on the screen
-2. Explain what is causing the problem in simple terms
-3. Provide a concrete fix or solution
-4. If there's code visible, show the corrected version
+Identify the specific error or problem visible on screen — quote the exact error message if
+there is one — explain in a sentence or two what's actually causing it, then give ONE
+concrete fix. Not a menu of alternatives: pick the best fix and go with it.
 
-Be specific and actionable. If you see an error message, quote it exactly."""
+Rules for your response:
+- Plain spoken sentences. No markdown — no # headers, no ## headers, no **bold**, no bullet
+  lists. This may be read aloud.
+- Say each thing once. Don't explain the cause and then restate it again in a "key takeaway"
+  or summary at the end — one pass, then stop.
+- If you're showing corrected code, include EXACTLY ONE triple-backtick code block containing
+  the fix, and nothing else in triple backticks anywhere in your response — not the original
+  error, not the traceback, not alternative versions. One block, the actual fix."""
 
         analysis = analyze_image(image_bytes, analysis_prompt)
         print(f"[Code] ✅ Screen analysis complete")
