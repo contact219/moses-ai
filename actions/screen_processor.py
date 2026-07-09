@@ -273,7 +273,7 @@ class _VisionSession:
             speech_config=gtypes.SpeechConfig(
                 voice_config=gtypes.VoiceConfig(
                     prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(
-                        voice_name="Orus"
+                        voice_name="Charon"
                     )
                 )
             ),
