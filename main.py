@@ -3,7 +3,9 @@ import re
 import threading
 import json
 import sys
+import time
 import traceback
+from collections import deque
 from pathlib import Path
 
 import sounddevice as sd
@@ -11,6 +13,9 @@ from google import genai
 from google.genai import types
 from ui import MosesUI
 from core.text_utils import strip_markdown_for_speech
+from core.turn_taking import (
+    BargeDetector, LatencyTimer, chunk_peak, record_latency, latency_summary, duration_seconds,
+)
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     format_episodes_for_prompt, record_episode, recall_relevant,
@@ -71,6 +76,32 @@ CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+LATENCY_PATH        = BASE_DIR / "memory" / "latency.jsonl"
+POST_SPEECH_GATE_S  = 0.4   # mic stays muted a beat after he stops: speaker tail / room echo
+RECENT_TURNS        = 12    # exchanges carried verbatim if a session must restart fresh
+
+
+class _SessionSwap(Exception):
+    """Raised inside the session to move onto a fresh connection (goAway)."""
+
+
+def _is_swap(e: BaseException) -> bool:
+    if isinstance(e, _SessionSwap):
+        return True
+    return isinstance(e, BaseExceptionGroup) and any(_is_swap(x) for x in e.exceptions)
+
+
+def _carried_block(turns) -> str:
+    if not turns:
+        return ""
+    lines = "\n".join(f"- {t[:400]}" for t in turns)
+    return (
+        "[THIS CONVERSATION SO FAR]\n"
+        "You are in the middle of a live conversation right now. The connection was "
+        "restarted; from the user's side nothing happened. Do NOT greet them or mention "
+        "any reset — just carry on from the last line. Most recent exchanges, oldest first:\n"
+        f"{lines}\n"
+    )
 
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -588,10 +619,26 @@ class MosesLive:
         self._turn_log: list[str] = []      # rolling conversation buffer for episodic memory
         self._episode_lock = threading.Lock()
         self.ui.vision_active = False       # true while the vision session is speaking
+        # ── conversation continuity (session resumption) ──
+        self._resume_handle: str | None = None   # latest handle: a reconnect continues THIS conversation
+        self._resume_failures = 0                # resumed connects in a row that died before any reply
+        self._recent = deque(maxlen=RECENT_TURNS)  # verbatim lines, for a fresh restart if the handle dies
+        self._carried = ""                       # [THIS CONVERSATION SO FAR] for that fresh restart
+        self._swap_event: asyncio.Event | None = None
+        self._swap_pending = False
+        self._turn_active = False                # something of the current turn has arrived
+        self._tools_running = 0
+        # ── barge-in / echo gate / latency ──
+        self._barge = BargeDetector()
+        self._latency = LatencyTimer()
+        self._drop_reply = False                 # after a barge-in: the cut reply's remaining audio is dropped
+        self._cut_this_turn = False              # the user cut this reply off — the log says so
+        self._mic_gate_until = 0.0
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
+        self._latency.reset()   # a typed turn isn't a hands-free wait
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
@@ -602,7 +649,10 @@ class MosesLive:
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
+            was = self._is_speaking
             self._is_speaking = value
+        if was and not value:
+            self._mic_gate_until = time.monotonic() + POST_SPEECH_GATE_S
         if value:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
@@ -612,6 +662,7 @@ class MosesLive:
         if not self._loop or not self.session:
             return
         text = strip_markdown_for_speech(text)
+        self._latency.reset()
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
@@ -629,8 +680,10 @@ class MosesLive:
         """Buffer a completed exchange; distil to an episode every few turns."""
         if user_text:
             self._turn_log.append(f"User: {user_text}")
+            self._recent.append(f"User: {user_text}")
         if moses_text:
             self._turn_log.append(f"Moses: {moses_text}")
+            self._recent.append(f"Moses: {moses_text}")
         if len([t for t in self._turn_log if t.startswith("User:")]) >= 5:
             batch = self._turn_log
             self._turn_log = []
@@ -681,6 +734,8 @@ class MosesLive:
         if episodes:
             parts.append(episodes)
         parts.append(sys_prompt)
+        if self._carried:
+            parts.append(self._carried)
 
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -688,7 +743,7 @@ class MosesLive:
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
-            session_resumption=types.SessionResumptionConfig(),
+            session_resumption=types.SessionResumptionConfig(handle=self._resume_handle),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -870,6 +925,53 @@ class MosesLive:
             response={"result": result}
         )
 
+    # ── barge-in ─────────────────────────────────────────────────────────────
+    def _flush_playback(self):
+        """Drop everything queued to play (an in-progress block finishes)."""
+        q = self.audio_in_queue
+        if q is not None:
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+        self.set_speaking(False)
+
+    def _barge_in(self):
+        """The user talked over him: stop now, open the floor."""
+        print(f"[MOSES] ✋ barge-in (threshold {self._barge.threshold():.0f})")
+        # Still generating? Then drop the rest of it. Already fully received
+        # (only the queue was playing)? Then there is nothing more to drop.
+        self._drop_reply = self._turn_active
+        self._cut_this_turn = self._turn_active
+        self._flush_playback()
+        self._mic_gate_until = 0.0   # their words go straight through; the model interrupts itself
+        self._latency.reset()
+
+    # ── session swap at a natural pause (goAway) ─────────────────────────────
+    def _mid_turn(self) -> bool:
+        q = self.audio_in_queue
+        return bool(self._is_speaking or self._turn_active or self._tools_running
+                    or (q is not None and not q.empty()))
+
+    def _request_swap(self, time_left_s: float):
+        if self._swap_pending or self._swap_event is None:
+            return
+        self._swap_pending = True
+        if not self._mid_turn():
+            self._swap_event.set()
+        else:
+            # Wait for the turn to finish, but never past Google's own cutoff.
+            asyncio.get_running_loop().call_later(max(0.0, time_left_s - 5), self._swap_event.set)
+
+    def _maybe_swap_now(self):
+        if self._swap_pending and self._swap_event is not None and not self._mid_turn():
+            self._swap_event.set()
+
+    async def _swap_watch(self):
+        await self._swap_event.wait()
+        raise _SessionSwap()
+
     async def _proactive_loop(self):
         """Every 30s, check if Moses should bring something up on his own."""
         from actions.proactive import due_nudges
@@ -901,7 +1003,17 @@ class MosesLive:
             with self._speaking_lock:
                 moses_speaking = self._is_speaking
             vision_speaking = getattr(self.ui, "vision_active", False)
-            if not moses_speaking and not vision_speaking and not self.ui.muted:
+            muted = self.ui.muted
+            now = time.monotonic()
+            peak = chunk_peak(indata)
+            # Voice barge-in: the mic is still WATCHED while he talks (it just
+            # isn't sent), and sustained speech well above his own echo cuts
+            # him off — the same move as talking over someone.
+            if self._barge.feed(peak, now * 1000, moses_speaking and not muted):
+                loop.call_soon_threadsafe(self._barge_in)
+                return
+            if not moses_speaking and not vision_speaking and not muted and now >= self._mic_gate_until:
+                self._latency.note_sent(peak, frames * 1000 / SEND_SAMPLE_RATE, now * 1000)
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -935,8 +1047,26 @@ class MosesLive:
         try:
             while True:
                 async for response in self.session.receive():
+                    self._resume_failures = 0   # the connection is really up
 
-                    if response.data:
+                    # Keep the latest handle so a reconnect continues THIS conversation.
+                    sru = response.session_resumption_update
+                    if sru and sru.new_handle:
+                        self._resume_handle = sru.new_handle
+                        self._carried = ""   # resumption carries the thread from here on
+
+                    # Google is about to close the connection: move to a fresh one
+                    # at the next pause instead of being cut off mid-sentence.
+                    if response.go_away:
+                        print(f"[MOSES] ⏳ goAway, time left: {response.go_away.time_left}")
+                        self._request_swap(duration_seconds(response.go_away.time_left))
+
+                    # A reply the user cut off is dropped until the model confirms the
+                    # interruption or finishes that turn — whichever comes first.
+                    # (Not a fixed window: if the model never registers the cut, a
+                    # timer would let the old reply start talking again.)
+                    if response.data and not self._drop_reply:
+                        self._turn_active = True
                         if self._turn_done_event and self._turn_done_event.is_set():
                             self._turn_done_event.clear()
                         self.audio_in_queue.put_nowait(response.data)
@@ -944,15 +1074,23 @@ class MosesLive:
                     if response.server_content:
                         sc = response.server_content
 
+                        # The model registered an interruption: drop what's queued.
+                        # Anything after this IS the new reply, so close the discard window.
+                        if sc.interrupted:
+                            self._drop_reply = False
+                            self._flush_playback()
+
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt:
                                 out_buf.append(txt)
+                                self._turn_active = True
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
                                 in_buf.append(txt)
+                                self._turn_active = True
 
                         if sc.turn_complete:
                             if self._turn_done_event:
@@ -964,6 +1102,9 @@ class MosesLive:
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
+                            if full_out and self._cut_this_turn:
+                                full_out += " [cut off — you talked over this]"
+                            self._cut_this_turn = False
                             if full_out:
                                 self.ui.write_log(f"Moses: {full_out}")
                             out_buf = []
@@ -971,11 +1112,19 @@ class MosesLive:
                             if full_in or full_out:
                                 self._log_turn(full_in, full_out)
 
+                            self._turn_active = False
+                            self._drop_reply = False   # the cut reply is over; what comes next is new
+                            self._maybe_swap_now()   # a goAway that was waiting for this pause
+
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[MOSES] 📞 {fc.name}")
-                            fr = await self._execute_tool(fc)
+                            self._tools_running += 1
+                            try:
+                                fr = await self._execute_tool(fc)
+                            finally:
+                                self._tools_running -= 1
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
@@ -1017,6 +1166,13 @@ class MosesLive:
                         self.set_speaking(False)
                         self._turn_done_event.clear()
                     continue
+                if not self._is_speaking:
+                    # First audio of a reply: how long did they wait to hear it?
+                    audible = (time.monotonic() + (stream.latency or 0)) * 1000
+                    ms = self._latency.reply_audible(audible)
+                    if ms is not None:
+                        record_latency(LATENCY_PATH, ms)
+                        print(f"[MOSES] ⏱ reply after {ms / 1000:.2f}s")
                 self.set_speaking(True)
                 await asyncio.to_thread(stream.write, chunk)
         except Exception as e:
@@ -1032,12 +1188,27 @@ class MosesLive:
             api_key=_get_api_key(),
             http_options={"api_version": "v1beta"}
         )
+        summary = latency_summary(LATENCY_PATH)
+        if summary:
+            print(f"[MOSES] ⏱ hands-free replies, last 7 days: median {summary['p50'] / 1000:.2f}s, "
+                  f"slowest 10% {summary['p90'] / 1000:.2f}s over {summary['turns']} turns")
 
+        delay = 1.5      # backoff after a failure; a planned swap reconnects at once
+        swap = False
         while True:
             try:
-                print("[MOSES] 🔌 Connecting...")
-                self.ui.set_state("THINKING")
+                if not swap:
+                    print("[MOSES] 🔌 Connecting...")
+                    self.ui.set_state("THINKING")
+                # A resume that keeps dying before any reply is a handle Google won't
+                # take any more: start fresh, carrying the recent exchanges instead.
+                if self._resume_handle and self._resume_failures >= 2:
+                    print("[MOSES] ⚠️ Resume refused twice — starting a fresh session with recent context")
+                    self._resume_handle = None
+                    self._carried = _carried_block(list(self._recent))
                 config = self._build_config()
+                if self._resume_handle:
+                    self._resume_failures += 1   # cleared by the first message received
 
                 async with (
                     client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
@@ -1048,24 +1219,38 @@ class MosesLive:
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
+                    self._swap_event    = asyncio.Event()
+                    self._swap_pending  = False
+                    self._turn_active   = False
 
-                    print("[MOSES] ✅ Connected.")
-                    self.ui.set_state("LISTENING")
-                    self.ui.write_log("SYS: Moses online.")
+                    print("[MOSES] ✅ Connected." + (" (continued)" if swap else ""))
+                    if not swap:
+                        self.ui.set_state("LISTENING")
+                        self.ui.write_log("SYS: Moses online.")
+                    swap = False
+                    delay = 1.5
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
                     tg.create_task(self._proactive_loop())
+                    tg.create_task(self._swap_watch())
 
             except Exception as e:
-                print(f"[MOSES] ⚠️ {e}")
-                traceback.print_exc()
+                if _is_swap(e):
+                    swap = True
+                else:
+                    print(f"[MOSES] ⚠️ {e}")
+                    traceback.print_exc()
             self.set_speaking(False)
+            if swap:
+                print("[MOSES] 🔁 Moving to a fresh connection (conversation continues)")
+                continue
             self.ui.set_state("THINKING")
-            print("[MOSES] 🔄 Reconnecting in 3s...")
-            await asyncio.sleep(3)
+            print(f"[MOSES] 🔄 Reconnecting in {delay:.1f}s...")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 15)
 
 def main():
     ui = MosesUI(str(BASE_DIR / "moses.png"))
