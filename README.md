@@ -224,7 +224,7 @@ Run the tests with `env/bin/python -m unittest discover -s tests`.
 
 ## License
 
-MIT — free to use, modify, and distribute.
+[CC BY-NC 4.0](LICENSE) — free to use, share and adapt for **non-commercial** purposes, with credit. This follows the license of the original MARK XXXIX project; commercial use is not permitted.
 
 ## Credits
 
