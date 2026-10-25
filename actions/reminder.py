@@ -138,6 +138,9 @@ except Exception:
     script_path.chmod(0o600)   # owner read/write only
     return script_path
 
+from xml.sax.saxutils import escape as xml_escape  # paths may contain & or <
+
+
 def _schedule_windows(target_dt: datetime, task_name: str,
                       script_path: Path, message: str) -> str:
     python_exe = Path(sys.executable)
@@ -155,8 +158,8 @@ def _schedule_windows(target_dt: datetime, task_name: str,
         '    <Enabled>true</Enabled>\n'
         '  </TimeTrigger></Triggers>\n'
         '  <Actions><Exec>\n'
-        f'    <Command>{python_exe}</Command>\n'
-        f'    <Arguments>"{script_path}"</Arguments>\n'
+        f'    <Command>{xml_escape(str(python_exe))}</Command>\n'
+        f'    <Arguments>&quot;{xml_escape(str(script_path))}&quot;</Arguments>\n'
         '  </Exec></Actions>\n'
         '  <Settings>\n'
         '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n'

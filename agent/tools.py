@@ -35,6 +35,16 @@ _DESTRUCTIVE_PATTERNS = [
     r"os\.system\(\s*['\"]\s*rm\s+-rf",
     r"format\s+[a-z]:",             # windows format
     r"subprocess.*shutdown", r"\bsudo\b\s+rm",
+    # Windows
+    r"rmtree\(\s*r?['\"][a-z]:[\\/]*['\"]",            # rmtree of a drive root
+    r"rmtree\(\s*(path\.home\(\)|os\.path\.expanduser\(\s*['\"]~['\"]\s*\)|os\.environ\[\s*['\"](userprofile|systemroot|windir)['\"]\s*\])\s*\)",
+    r"\b(rmdir|rd)\s+/s\b",                         # cmd recursive delete
+    r"\bdel\s+(/[a-z]\s+)*[a-z]:\\",                # del of a drive path
+    r"remove-item\b(?=[^\n]*-recurse)[^\n]*([a-z]:\\*(windows|users)?[\s'\"]|\$env:(userprofile|systemroot|windir)|\s~)",
+    r"\b(format-volume|clear-disk|initialize-disk|diskpart|bcdedit)\b",
+    r"\bcipher\s+/w", r"\bvssadmin\s+delete",
+    r"\breg\s+delete\s+hk(lm|ey_local_machine)",
+    r"\b(stop|restart)-computer\b", r"\bshutdown(\.exe)?\s+[/-][srpfh]",
 ]
 
 

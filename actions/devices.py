@@ -7,6 +7,7 @@ main mic/speaker streams and the vision camera capture.
 """
 
 import glob
+import platform
 from pathlib import Path
 
 from memory.config_manager import get_config_value, set_config_value
@@ -28,14 +29,31 @@ def _query_audio() -> list[dict]:
         return []
 
 
-def list_microphones() -> list[tuple[int, str]]:
+def _default_hostapi() -> int | None:
+    """Windows lists every device once per audio API (MME, DirectSound, WASAPI,
+    WDM-KS). Keep only the API the system default device uses — the one the
+    mic/speaker streams already work with — so each device shows up once."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import sounddevice as sd
+        return sd.query_devices(kind="input")["hostapi"]
+    except Exception:
+        return None
+
+
+def _list(channels_key: str) -> list[tuple[int, str]]:
+    api = _default_hostapi()
     return [(i, d["name"]) for i, d in enumerate(_query_audio())
-            if d.get("max_input_channels", 0) > 0]
+            if d.get(channels_key, 0) > 0 and (api is None or d.get("hostapi") == api)]
+
+
+def list_microphones() -> list[tuple[int, str]]:
+    return _list("max_input_channels")
 
 
 def list_speakers() -> list[tuple[int, str]]:
-    return [(i, d["name"]) for i, d in enumerate(_query_audio())
-            if d.get("max_output_channels", 0) > 0]
+    return _list("max_output_channels")
 
 
 def get_audio_device(kind: str) -> int | None:
@@ -63,7 +81,8 @@ def _match_device(query: str, devices: list[tuple[int, str]]) -> tuple[int, str]
 # ── cameras ────────────────────────────────────────────────────────────────
 
 def list_cameras() -> list[tuple[int, str]]:
-    """Enumerate webcams. On Linux use /dev/video*, then confirm each opens."""
+    """Enumerate webcams. On Linux use /dev/video*; elsewhere (Windows) probe
+    indices 0-5. Either way, confirm each one opens."""
     cams: list[tuple[int, str]] = []
     try:
         from actions.screen_processor import _probe_camera, _cv2_backend

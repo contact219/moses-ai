@@ -245,10 +245,12 @@ class _SysMetrics:
             except Exception:
                 pass
 
-        if _OS == "Windows":
+        # Starting PowerShell every 1.5s is costly, and this WMI class usually
+        # needs admin rights; after one failure, stop asking.
+        if _OS == "Windows" and not getattr(self, "_win_temp_failed", False):
             try:
                 r = subprocess.run(
-                    ["powershell", "-Command",
+                    ["powershell", "-NoProfile", "-Command",
                      "(Get-WmiObject MSAcpi_ThermalZoneTemperature -Namespace root/wmi).CurrentTemperature"],
                     capture_output=True, text=True, timeout=3
                 )
@@ -257,6 +259,7 @@ class _SysMetrics:
                     return (raw / 10.0) - 273.15
             except Exception:
                 pass
+            self._win_temp_failed = True
 
         return -1.0
 
