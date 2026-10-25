@@ -29,3 +29,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Runtime state
+config/persona.json
+memory/latency.jsonl

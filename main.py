@@ -13,6 +13,7 @@ from google import genai
 from google.genai import types
 from ui import MosesUI
 from core.text_utils import strip_markdown_for_speech
+from core.personas import get_persona, load_persona_key, save_persona_key
 from core.turn_taking import (
     BargeDetector, LatencyTimer, chunk_peak, record_latency, latency_summary, duration_seconds,
 )
@@ -78,6 +79,7 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 LATENCY_PATH        = BASE_DIR / "memory" / "latency.jsonl"
 POST_SPEECH_GATE_S  = 0.4   # mic stays muted a beat after he stops: speaker tail / room echo
+DROP_REPLY_MAX_S    = 8     # a cut reply still generating after this: swap connections to end it
 RECENT_TURNS        = 12    # exchanges carried verbatim if a session must restart fresh
 
 
@@ -108,12 +110,13 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
-def _load_system_prompt() -> str:
+def _load_system_prompt(persona: dict | None = None) -> str:
+    persona = persona or get_persona("moses")
     try:
-        return PROMPT_PATH.read_text(encoding="utf-8")
+        return Path(persona["prompt"]).read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are Moses, an advanced AI assistant. "
+            f"You are {persona['name']}, an advanced AI assistant. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
@@ -425,6 +428,20 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "switch_persona",
+        "description": (
+            "Hands the conversation to the other assistant on this desk: Moses or Mina. "
+            "Call it when the user asks to talk to the other one ('let me talk to Mina', "
+            "'put Moses back on', 'switch to Mina'). Say one short line handing over, then call it. "
+            "They share one memory; only the voice and personality change."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {"persona": {"type": "STRING", "description": "moses | mina"}},
+            "required": ["persona"]
+        }
+    },
+    {
         "name": "shutdown_moses",
         "description": (
             "Shuts down the assistant completely. "
@@ -619,6 +636,11 @@ class MosesLive:
         self._turn_log: list[str] = []      # rolling conversation buffer for episodic memory
         self._episode_lock = threading.Lock()
         self.ui.vision_active = False       # true while the vision session is speaking
+        # ── persona (Moses / Mina): one memory, two voices ──
+        self.persona = get_persona(load_persona_key())
+        self._switch_to: str | None = None       # persona to hand over to at the next swap
+        self._handoff_from: str | None = None    # who handed over — the new one says hello
+        self.ui.on_persona_switch = self._on_ui_persona_switch
         # ── conversation continuity (session resumption) ──
         self._resume_handle: str | None = None   # latest handle: a reconnect continues THIS conversation
         self._resume_failures = 0                # resumed connects in a row that died before any reply
@@ -633,6 +655,7 @@ class MosesLive:
         self._latency = LatencyTimer()
         self._drop_reply = False                 # after a barge-in: the cut reply's remaining audio is dropped
         self._cut_this_turn = False              # the user cut this reply off — the log says so
+        self._drop_since = 0.0
         self._mic_gate_until = 0.0
 
     def _on_text_command(self, text: str):
@@ -682,8 +705,8 @@ class MosesLive:
             self._turn_log.append(f"User: {user_text}")
             self._recent.append(f"User: {user_text}")
         if moses_text:
-            self._turn_log.append(f"Moses: {moses_text}")
-            self._recent.append(f"Moses: {moses_text}")
+            self._turn_log.append(f"{self.persona['name']}: {moses_text}")
+            self._recent.append(f"{self.persona['name']}: {moses_text}")
         if len([t for t in self._turn_log if t.startswith("User:")]) >= 5:
             batch = self._turn_log
             self._turn_log = []
@@ -718,7 +741,7 @@ class MosesLive:
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
         episodes   = format_episodes_for_prompt()
-        sys_prompt = _load_system_prompt()
+        sys_prompt = _load_system_prompt(self.persona)
 
         now      = datetime.now()
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
@@ -747,7 +770,7 @@ class MosesLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name=self.persona["voice"]   # Moses: Charon (unchanged), Mina: Aoede
                     )
                 )
             ),
@@ -899,6 +922,9 @@ class MosesLive:
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name == "switch_persona":
+                result = self._queue_switch(args.get("persona", ""))
+
             elif name == "shutdown_moses":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("Aight, I'm out. Catch you later.")
@@ -943,6 +969,7 @@ class MosesLive:
         # Still generating? Then drop the rest of it. Already fully received
         # (only the queue was playing)? Then there is nothing more to drop.
         self._drop_reply = self._turn_active
+        self._drop_since = time.monotonic()
         self._cut_this_turn = self._turn_active
         self._flush_playback()
         self._mic_gate_until = 0.0   # their words go straight through; the model interrupts itself
@@ -968,6 +995,50 @@ class MosesLive:
         if self._swap_pending and self._swap_event is not None and not self._mid_turn():
             self._swap_event.set()
 
+    # ── persona switch ───────────────────────────────────────────────────────
+    def _queue_switch(self, key: str, now: bool = False) -> str:
+        """Hand over to the other persona at the next pause (now=True: the HUD button)."""
+        target = get_persona(key)
+        if (key or "").lower() not in ("moses", "mina"):
+            return "Unknown persona — it's Moses or Mina."
+        if target["key"] == self.persona["key"]:
+            return f"{target['name']} is already here."
+        self._switch_to = target["key"]
+        if self._swap_event is None:
+            return f"Switching to {target['name']}."
+        if now:
+            self._drop_reply = self._turn_active
+            self._drop_since = time.monotonic()
+            self._flush_playback()
+            self._swap_event.set()
+        else:
+            self._swap_pending = True
+            self._maybe_swap_now()   # mid-reply: _turn_active holds it until turn_complete
+        return f"Handing over to {target['name']} now."
+
+    def _on_ui_persona_switch(self, key: str):
+        """Called from the Qt thread when a persona button is clicked."""
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._queue_switch, key, True)
+
+    def _apply_pending_switch(self):
+        if not self._switch_to or self._switch_to == self.persona["key"]:
+            self._switch_to = None
+            return
+        old = self.persona
+        self.persona = get_persona(self._switch_to)
+        self._switch_to = None
+        save_persona_key(self.persona["key"])
+        print(f"[MOSES] 🔀 {old['name']} → {self.persona['name']}")
+        # A resumption handle belongs to the old persona's session (its voice and
+        # prompt). Start fresh, carrying the last few exchanges so the newcomer
+        # knows what was just said.
+        self._resume_handle = None
+        self._carried = _carried_block(list(self._recent))
+        self._handoff_from = old["name"]
+        self.ui.set_persona(self.persona["key"])
+        self.ui.write_log(f"SYS: {old['name']} handed over to {self.persona['name']}.")
+
     async def _swap_watch(self):
         await self._swap_event.wait()
         raise _SessionSwap()
@@ -982,7 +1053,7 @@ class MosesLive:
                 if self._is_speaking or getattr(self.ui, "vision_active", False) or self.ui.muted:
                     continue
                 for line in due_nudges():
-                    self.ui.write_log(f"Moses (proactive): {line}")
+                    self.ui.write_log(f"{self.persona['name']} (proactive): {line}")
                     self.speak(line)
                     await asyncio.sleep(4)
             except Exception as e:
@@ -1065,6 +1136,14 @@ class MosesLive:
                     # interruption or finishes that turn — whichever comes first.
                     # (Not a fixed window: if the model never registers the cut, a
                     # timer would let the old reply start talking again.)
+                    # The model never registered the cut (a loud non-speech sound
+                    # triggered it) and is still generating the old reply. Don't
+                    # let it resume — move to a fresh connection, same conversation.
+                    if (self._drop_reply and not self._swap_pending and self._swap_event is not None
+                            and time.monotonic() - self._drop_since > DROP_REPLY_MAX_S):
+                        print("[MOSES] ⚠️ cut reply kept going — moving to a fresh connection")
+                        self._swap_pending = True
+                        self._swap_event.set()
                     if response.data and not self._drop_reply:
                         self._turn_active = True
                         if self._turn_done_event and self._turn_done_event.is_set():
@@ -1106,7 +1185,7 @@ class MosesLive:
                                 full_out += " [cut off — you talked over this]"
                             self._cut_this_turn = False
                             if full_out:
-                                self.ui.write_log(f"Moses: {full_out}")
+                                self.ui.write_log(f"{self.persona['name']}: {full_out}")
                             out_buf = []
 
                             if full_in or full_out:
@@ -1165,6 +1244,9 @@ class MosesLive:
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
+                        # The reply has finished PLAYING, not just generating — the
+                        # real pause a waiting swap (goAway, persona switch) needs.
+                        self._maybe_swap_now()
                     continue
                 if not self._is_speaking:
                     # First audio of a reply: how long did they wait to hear it?
@@ -1202,6 +1284,7 @@ class MosesLive:
                     self.ui.set_state("THINKING")
                 # A resume that keeps dying before any reply is a handle Google won't
                 # take any more: start fresh, carrying the recent exchanges instead.
+                self._apply_pending_switch()
                 if self._resume_handle and self._resume_failures >= 2:
                     print("[MOSES] ⚠️ Resume refused twice — starting a fresh session with recent context")
                     self._resume_handle = None
@@ -1222,11 +1305,13 @@ class MosesLive:
                     self._swap_event    = asyncio.Event()
                     self._swap_pending  = False
                     self._turn_active   = False
+                    self._drop_reply    = False   # a cut reply belonged to the old connection
+                    self._cut_this_turn = False
 
                     print("[MOSES] ✅ Connected." + (" (continued)" if swap else ""))
                     if not swap:
                         self.ui.set_state("LISTENING")
-                        self.ui.write_log("SYS: Moses online.")
+                        self.ui.write_log(f"SYS: {self.persona['name']} online.")
                     swap = False
                     delay = 1.5
 
@@ -1236,6 +1321,14 @@ class MosesLive:
                     tg.create_task(self._play_audio())
                     tg.create_task(self._proactive_loop())
                     tg.create_task(self._swap_watch())
+                    if self._handoff_from:
+                        who, self._handoff_from = self._handoff_from, None
+                        await session.send_client_content(
+                            turns={"parts": [{"text": (
+                                f"[{who} just handed this conversation over to you. Say a short hello "
+                                f"in your own voice and pick up the thread — no long introduction.]")}]},
+                            turn_complete=True,
+                        )
 
             except Exception as e:
                 if _is_swap(e):
@@ -1253,7 +1346,7 @@ class MosesLive:
             delay = min(delay * 2, 15)
 
 def main():
-    ui = MosesUI(str(BASE_DIR / "moses.png"))
+    ui = MosesUI(str(BASE_DIR / "moses.png"), persona_key=load_persona_key())
 
     def runner():
         ui.wait_for_api_key()

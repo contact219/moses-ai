@@ -22,6 +22,7 @@ from PyQt6.QtGui import (
     QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
     QRadialGradient, QShortcut,
 )
+from PyQt6.QtMultimedia import QMediaPlayer, QVideoSink
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextEdit,
@@ -34,6 +35,8 @@ def _base_dir() -> Path:
     return Path(__file__).resolve().parent
 
 BASE_DIR   = _base_dir()
+sys.path.insert(0, str(BASE_DIR))
+from core.personas import PERSONAS, get_persona  # noqa: E402
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
 
@@ -67,10 +70,38 @@ class C:
     WHITE     = "#d8f8ff"
     DARK      = "#000d14"
     BAR_BG    = "#011520"
+    ZONE_DRAG  = "#001a24"   # file drop zone tints (persona palettes re-colour these too)
+    ZONE_HOVER = "#001218"
+    ZONE_LINE  = "#1a4a5a"
+    ZONE_TEXT  = "#1e5c6a"
 
 
 def qcol(h: str, a: int = 255) -> QColor:
     c = QColor(h); c.setAlpha(a); return c
+
+
+def apply_palette(old: dict, new: dict):
+    """Re-colour the whole window in place: Moses cyan <-> Mina rose.
+
+    Painted widgets read C at paint time, so updating C covers them; widgets
+    styled with stylesheets get the old hex values swapped for the new ones in
+    one pass (a single pass, so no colour is ever swapped twice).
+    """
+    import re
+    for k, v in new.items():
+        setattr(C, k, v)
+    swap = {old[k].lower(): new[k] for k in old if k in new}
+    pat = re.compile("|".join(re.escape(h) for h in swap), re.IGNORECASE)
+    for w in QApplication.allWidgets():
+        ss = w.styleSheet()
+        if ss:
+            new_ss = pat.sub(lambda m: swap[m.group(0).lower()], ss)
+            if new_ss != ss:
+                w.setStyleSheet(new_ss)
+        col = getattr(w, "_color", None)
+        if isinstance(col, str) and col.lower() in swap:
+            w._color = swap[col.lower()]
+        w.update()
 
 class _SysMetrics:
     def __init__(self):
@@ -267,13 +298,59 @@ class HudCanvas(QWidget):
         self._blink_tick = 0
         self._particles: list[list[float]] = []
         self._face_px: QPixmap | None = None
+        self._face_cache: tuple[int, QPixmap] | None = None   # still, scaled for the current size
+        self._label = "M.O.S.E.S"
+        # Talking face: the persona's looping video plays ONLY while they speak
+        # (the web app's face ring); otherwise the still portrait. Muted video —
+        # the voice is the live audio, not this file.
+        self._video_frame: QPixmap | None = None
+        self._video_on = False
+        self._sink = QVideoSink(self)
+        self._sink.videoFrameChanged.connect(self._on_video_frame)
+        self._player = QMediaPlayer(self)
+        self._player.setVideoSink(self._sink)
+        self._player.setLoops(QMediaPlayer.Loops.Infinite)
         self._load_face(face_path)
 
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
 
+    def set_persona(self, persona: dict):
+        self._label = persona["title"]
+        self._load_face(str(persona["face"]))
+        self._video_on = False
+        self._video_frame = None
+        self._player.stop()
+        video = Path(persona["video"])
+        self._player.setSource(QUrl.fromLocalFile(str(video)) if video.exists() else QUrl())
+        self.update()
+
+    def _on_video_frame(self, frame):
+        if not self._video_on:
+            return
+        img = frame.toImage()
+        if not img.isNull():
+            self._video_frame = QPixmap.fromImage(img)
+
+    def _sync_video(self):
+        want = self.speaking and not self.muted and not self._player.source().isEmpty()
+        if want == self._video_on:
+            return
+        self._video_on = want
+        if want:
+            self._player.play()
+        else:
+            self._player.pause()
+            self._video_frame = None   # back to the still portrait
+
     def _load_face(self, path: str):
+        self._face_cache = None
+        if path.lower().endswith((".jpg", ".jpeg")):
+            px = QPixmap(path)       # already a clean face crop; clipped to a circle when drawn
+            self._face_px = px if not px.isNull() else None
+            if self._face_px:
+                return
         try:
             from PIL import Image, ImageDraw
             import io
@@ -292,6 +369,7 @@ class HudCanvas(QWidget):
 
     def _step(self):
         self._tick += 1
+        self._sync_video()
         now = time.time()
         if now - self._last_t > (0.12 if self.speaking else 0.5):
             if self.speaking:
@@ -431,15 +509,32 @@ class HudCanvas(QWidget):
             p.drawLine(QPointF(bx, by), QPointF(bx + dx * bl, by))
             p.drawLine(QPointF(bx, by), QPointF(bx, by + dy * bl))
 
-        # face
-        if self._face_px:
-            fsz    = int(fw * 0.62 * self._scale)
-            scaled = self._face_px.scaled(
-                fsz, fsz,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            p.drawPixmap(int(cx - fsz / 2), int(cy - fsz / 2), scaled)
+        # face — circular portrait (talking video while speaking) in an accent ring
+        src = self._video_frame or self._face_px
+        if src:
+            fsz = int(fw * 0.62 * self._scale)
+            if src is self._face_px:
+                base = int(fw * 0.62 * 1.15)   # cache the still at its largest breathing size
+                if not self._face_cache or self._face_cache[0] != base:
+                    self._face_cache = (base, self._face_px.scaled(
+                        base, base, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation))
+                img = self._face_cache[1]
+            else:
+                img = src.scaled(fsz, fsz, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                 Qt.TransformationMode.SmoothTransformation)
+            face_rect = QRectF(cx - fsz / 2, cy - fsz / 2, fsz, fsz)
+            clip = QPainterPath(); clip.addEllipse(face_rect)
+            p.save()
+            p.setClipPath(clip)
+            # cover-fit, centred, a little high so the eyes sit on the centre line
+            k = fsz / min(img.width(), img.height())
+            dw, dh = img.width() * k, img.height() * k
+            p.drawPixmap(QRectF(cx - dw / 2, cy - dh * 0.46, dw, dh), img, QRectF(img.rect()))
+            p.restore()
+            ring = qcol(C.MUTED_C if self.muted else C.PRI, min(255, int(120 + self._halo * 0.6)))
+            p.setPen(QPen(ring, 2.5)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(face_rect)
         else:
             orb_r = int(fw * 0.27 * self._scale)
             oc    = (200, 0, 50) if self.muted else (0, 60, 110)
@@ -453,7 +548,7 @@ class HudCanvas(QWidget):
             p.setPen(QPen(qcol(C.PRI, min(255, int(self._halo * 2))), 1))
             p.setFont(QFont("Courier New", 13, QFont.Weight.Bold))
             p.drawText(QRectF(cx - 80, cy - 14, 160, 28),
-                       Qt.AlignmentFlag.AlignCenter, "M.O.S.E.S")
+                       Qt.AlignmentFlag.AlignCenter, self._label)
 
         # particles
         for pt in self._particles:
@@ -607,7 +702,7 @@ class LogWidget(QTextEdit):
         self._pos    = 0
         tl = self._text.lower()
         if   tl.startswith("you:"):    self._tag = "you"
-        elif tl.startswith("moses:"): self._tag = "ai"
+        elif tl.startswith(("moses", "mina")): self._tag = "ai"
         elif tl.startswith("file:"):   self._tag = "file"
         elif "err" in tl:              self._tag = "err"
         else:                          self._tag = "sys"
@@ -765,7 +860,7 @@ class _DropCanvas(QWidget):
         pad  = 6
         rect = QRectF(pad, pad, W - pad * 2, H - pad * 2)
 
-        bg_col = qcol("#001a24" if z._drag_over else ("#001218" if z._hovering else C.PANEL))
+        bg_col = qcol(C.ZONE_DRAG if z._drag_over else (C.ZONE_HOVER if z._hovering else C.PANEL))
         p.setBrush(QBrush(bg_col)); p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(rect, 6, 6)
 
@@ -796,7 +891,7 @@ class _DropCanvas(QWidget):
         p.drawText(QRectF(0, cy + 8, W, 16), Qt.AlignmentFlag.AlignCenter,
                    "Drop file here  or  Click to Browse")
         p.setFont(QFont("Courier New", 7))
-        p.setPen(QPen(qcol("#1a4a5a"), 1))
+        p.setPen(QPen(qcol(C.ZONE_LINE), 1))
         p.drawText(QRectF(0, cy + 24, W, 14), Qt.AlignmentFlag.AlignCenter,
                    "Images · Video · Audio · PDF · Docs · Code · Data")
 
@@ -837,7 +932,7 @@ class _DropCanvas(QWidget):
                    f"{ext_str}  ·  {size_str}")
 
         p.setFont(QFont("Courier New", 6))
-        p.setPen(QPen(qcol("#1e5c6a"), 1))
+        p.setPen(QPen(qcol(C.ZONE_TEXT), 1))
         par = str(path.parent)
         if len(par) > 42: par = "…" + par[-41:]
         p.drawText(QRectF(tx, H * 0.18 + 34, tw, 12),
@@ -988,8 +1083,12 @@ class MainWindow(QMainWindow):
     _log_sig   = pyqtSignal(str)
     _state_sig = pyqtSignal(str)
 
-    def __init__(self, face_path: str):
+    _persona_sig = pyqtSignal(str)
+
+    def __init__(self, face_path: str, persona_key: str = "moses"):
         super().__init__()
+        self._persona = get_persona("moses")   # the window is built in Moses's palette, then switched
+        self.on_persona_switch = None
         self.setWindowTitle("Moses — Model Optimized Smart Expert System")
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.resize(_DEFAULT_W, _DEFAULT_H)
@@ -1053,6 +1152,39 @@ class MainWindow(QMainWindow):
         sc_mute.activated.connect(self._toggle_mute)
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self._toggle_fullscreen)
+        sc_persona = QShortcut(QKeySequence("F6"), self)
+        sc_persona.activated.connect(
+            lambda: self._request_persona("mina" if self._persona["key"] == "moses" else "moses"))
+
+        self._persona_sig.connect(self.set_persona)
+        self.hud.set_persona(self._persona)
+        self._style_persona_btns()
+        if persona_key != "moses":
+            self.set_persona(persona_key)
+
+    # ── persona ─────────────────────────────────────────────────────────────
+    def _request_persona(self, key: str):
+        """A button/F6 asks for a switch; the voice loop does it and calls set_persona back."""
+        if key == self._persona["key"]:
+            return
+        if self.on_persona_switch:
+            self.on_persona_switch(key)
+        else:
+            self.set_persona(key)
+
+    def set_persona(self, key: str):
+        new = get_persona(key)
+        old = self._persona
+        if new["key"] != old["key"]:
+            apply_palette(old["palette"], new["palette"])
+            self._persona = new
+        self.setWindowTitle(f"{new['name']} — {new['subtitle']}")
+        self._title_lbl.setText(new["title"])
+        self._sub_lbl.setText(new["subtitle"])
+        self._badge_lbl.setText(new["title"])
+        self._footer_lbl.setText(f"{new['name']}  ·  {new['subtitle']}")
+        self.hud.set_persona(new)
+        self._style_persona_btns()
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -1135,7 +1267,9 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_badge("M.O.S.E.S", C.PRI_DIM))
+        self._badge_lbl = _badge("M.O.S.E.S", C.PRI_DIM)
+        self._badge_lbl.setMinimumWidth(90)
+        lay.addWidget(self._badge_lbl)
         lay.addStretch()
 
         mid = QVBoxLayout(); mid.setSpacing(1)
@@ -1144,11 +1278,13 @@ class MainWindow(QMainWindow):
         title.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         mid.addWidget(title)
+        self._title_lbl = title
         sub = QLabel("Model Optimized Smart Expert System")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setFont(QFont("Courier New", 7))
         sub.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
         mid.addWidget(sub)
+        self._sub_lbl = sub
         lay.addLayout(mid)
         lay.addStretch()
 
@@ -1279,6 +1415,19 @@ class MainWindow(QMainWindow):
         lay.addWidget(_sec("COMMAND INPUT"))
         lay.addLayout(self._build_input_row())
 
+        lay.addWidget(_sec("PERSONA  [F6]"))
+        prow = QHBoxLayout(); prow.setSpacing(5)
+        self._persona_btns = {}
+        for key in ("moses", "mina"):
+            b = QPushButton(f"◈  {PERSONAS[key]['name'].upper()}")
+            b.setFixedHeight(28)
+            b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self._request_persona(k))
+            self._persona_btns[key] = b
+            prow.addWidget(b)
+        lay.addLayout(prow)
+
         self._mute_btn = QPushButton("🎙  MICROPHONE ACTIVE")
         self._mute_btn.setFixedHeight(30)
         self._mute_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
@@ -1347,9 +1496,10 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
+        lay.addWidget(_fl("[F4] Mute  ·  [F6] Moses/Mina  ·  [F11] Fullscreen"))
         lay.addStretch()
-        lay.addWidget(_fl("Moses  ·  Model Optimized Smart Expert System  ·  CLASSIFIED"))
+        self._footer_lbl = _fl("Moses  ·  Model Optimized Smart Expert System")
+        lay.addWidget(self._footer_lbl)
         lay.addStretch()
         lay.addWidget(_fl("© FATIHMAKES", C.PRI_DIM))
         return w
@@ -1381,6 +1531,16 @@ class MainWindow(QMainWindow):
         else:
             self._apply_state("LISTENING")
             self._log.append_log("SYS: Microphone active.")
+
+    def _style_persona_btns(self):
+        for key, b in self._persona_btns.items():
+            if key == self._persona["key"]:
+                b.setStyleSheet(f"QPushButton {{ background: {C.PRI_GHO}; color: {C.PRI};"
+                                f" border: 1px solid {C.PRI}; border-radius: 3px; }}")
+            else:
+                b.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.TEXT_DIM};"
+                                f" border: 1px solid {C.BORDER}; border-radius: 3px; }}"
+                                f"QPushButton:hover {{ color: {C.PRI}; border: 1px solid {C.BORDER_B}; }}")
 
     def _style_mute_btn(self):
         if self._muted:
@@ -1445,7 +1605,7 @@ class MainWindow(QMainWindow):
             self._overlay.hide()
             self._overlay = None
         self._apply_state("LISTENING")
-        self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. Moses online.")
+        self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._persona['name']} online.")
 
 class _RootShim:
     def __init__(self, app: QApplication):
@@ -1457,10 +1617,10 @@ class _RootShim:
 
 
 class MosesUI:
-    def __init__(self, face_path: str, size=None):
+    def __init__(self, face_path: str, size=None, persona_key: str = "moses"):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
-        self._win = MainWindow(face_path)
+        self._win = MainWindow(face_path, persona_key)
         self._win.show()
         self.root = _RootShim(self._app)
 
@@ -1487,6 +1647,18 @@ class MosesUI:
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
+
+    @property
+    def on_persona_switch(self):
+        return self._win.on_persona_switch
+
+    @on_persona_switch.setter
+    def on_persona_switch(self, cb):
+        self._win.on_persona_switch = cb
+
+    def set_persona(self, key: str):
+        """Thread-safe: re-theme the window for Moses or Mina."""
+        self._win._persona_sig.emit(key)
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
