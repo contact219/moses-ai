@@ -225,3 +225,8 @@ Run the tests with `env/bin/python -m unittest discover -s tests`.
 ## License
 
 MIT — free to use, modify, and distribute.
+
+## Credits
+
+Moses is built on **MARK XXXIX** by **FatihMakes** — the original cross-platform voice assistant this project grew from ([setup video](https://youtu.be/ej1f5OE3SNQ)).
+
