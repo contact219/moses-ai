@@ -33,3 +33,5 @@ Thumbs.db
 # Runtime state
 config/persona.json
 memory/latency.jsonl
+memory/embeddings.json
+memory/pending_turns.json

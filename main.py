@@ -20,7 +20,10 @@ from core.turn_taking import (
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     format_episodes_for_prompt, record_episode, recall_relevant,
+    save_fact, forget_matching, save_pending, take_pending,
+    EPISODE_PROMPT, parse_episode, fallback_summary,
 )
+from memory import semantic
 
 from actions.file_processor    import file_processor
 from actions.flight_finder     import flight_finder
@@ -540,14 +543,36 @@ TOOL_DECLARATIONS = [
                         "preferences — favorite food/color/music/film/game/sport, hobbies | "
                         "projects — active projects, goals, things being built | "
                         "relationships — friends, family, partner, colleagues | "
+                        "health — allergies, conditions, medications, emergency contacts: anything where forgetting could hurt them | "
                         "wishes — future plans, things to buy, travel dreams | "
                         "notes — habits, schedule, anything else worth remembering"
                     )
                 },
-                "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
+                "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name). A key is a SLOT: reuse the same key to update a known fact."},
                 "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
+                "importance": {"type": "STRING", "description": "routine (default) | important | critical — critical facts are never trimmed (allergies, medications, a child's name)"},
+                "replaces": {"type": "STRING", "description": "Optional category/key of an existing fact this one supersedes (e.g. 'projects/old_goal'). Only for a genuine replacement."},
             },
             "required": ["category", "key", "value"]
+        }
+    },
+    {
+        "name": "forget_memory",
+        "description": (
+            "Delete something from memory when the user asks you to forget it ('forget that', "
+            "'don't remember my old address'). Give category+key for one known fact, or a short "
+            "query — every fact and past-session note containing ALL its words is deleted. "
+            "It returns exactly what was deleted. Never say you forgot something unless this "
+            "tool says it was deleted; if nothing matched, tell them plainly and ask what to look for."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query":    {"type": "STRING", "description": "Words that identify what to forget (e.g. 'old address', 'secret word')"},
+                "category": {"type": "STRING", "description": "Optional: category of one exact fact"},
+                "key":      {"type": "STRING", "description": "Optional: key of one exact fact"},
+            },
+            "required": []
         }
     },
     {
@@ -641,6 +666,13 @@ class MosesLive:
         self._switch_to: str | None = None       # persona to hand over to at the next swap
         self._handoff_from: str | None = None    # who handed over — the new one says hello
         self.ui.on_persona_switch = self._on_ui_persona_switch
+        # Whatever was said after the last episode before the app last closed.
+        leftover = take_pending()
+        if leftover:
+            print(f"[Memory] 📓 distilling {len(leftover)} turn(s) left over from last time")
+            threading.Thread(target=self._distil_episode, args=(leftover,), daemon=True).start()
+        else:
+            semantic.refresh_in_background()
         # ── conversation continuity (session resumption) ──
         self._resume_handle: str | None = None   # latest handle: a reconnect continues THIS conversation
         self._resume_failures = 0                # resumed connects in a row that died before any reply
@@ -707,33 +739,34 @@ class MosesLive:
         if moses_text:
             self._turn_log.append(f"{self.persona['name']}: {moses_text}")
             self._recent.append(f"{self.persona['name']}: {moses_text}")
+        save_pending(self._turn_log)   # survives the app closing before the next episode
         if len([t for t in self._turn_log if t.startswith("User:")]) >= 5:
             batch = self._turn_log
             self._turn_log = []
+            save_pending([])
             threading.Thread(
                 target=self._distil_episode, args=(batch,), daemon=True
             ).start()
 
     def _distil_episode(self, turns: list[str]):
-        """Summarize a batch of turns into one durable episodic memory line."""
+        """Summarize a batch of turns into one durable episodic memory line (with topic tags)."""
         with self._episode_lock:
             try:
                 from core.persona import get_client
                 convo = "\n".join(turns)[:4000]
                 resp  = get_client().models.generate_content(
                     model="gemini-2.5-flash-lite",
-                    contents=(
-                        "Summarize this conversation slice into ONE past-tense sentence "
-                        "capturing what the user did, asked, or shared that's worth "
-                        "remembering next time. If nothing is worth keeping, reply NONE.\n\n"
-                        f"{convo}"
-                    ),
+                    contents=EPISODE_PROMPT + convo,
                 )
-                summary = (resp.text or "").strip()
-                if summary and summary.upper() != "NONE":
-                    record_episode(summary)
+                parsed = parse_episode(resp.text or "")
+                if parsed:
+                    record_episode(parsed[0], parsed[1])
             except Exception as e:
-                print(f"[MOSES] ⚠️ Episode distil failed: {e}")
+                print(f"[MOSES] ⚠️ Episode distil failed: {e} — keeping their own words instead")
+                fb = fallback_summary(turns)
+                if fb:
+                    record_episode(fb, ["unsummarized"])
+            semantic.refresh_in_background()
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -801,8 +834,9 @@ class MosesLive:
             key      = args.get("key", "")
             value    = args.get("value", "")
             if key and value:
-                update_memory({category: {key: {"value": value}}})
+                save_fact(category, key, value, args.get("importance"), args.get("replaces"))
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                semantic.refresh_in_background()
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -810,8 +844,22 @@ class MosesLive:
                 response={"result": "ok", "silent": True}
             )
 
+        if name == "forget_memory":
+            removed = await asyncio.get_event_loop().run_in_executor(None, lambda: forget_matching(
+                args.get("query", ""), args.get("category", ""), args.get("key", "")))
+            semantic.refresh_in_background()
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            msg = ("Deleted: " + " | ".join(removed)) if removed else \
+                  "Nothing in memory matched that, so nothing was deleted."
+            if removed:
+                self.ui.write_log(f"SYS: Forgot {len(removed)} item(s).")
+            return types.FunctionResponse(id=fc.id, name=name, response={"result": msg})
+
         if name == "recall_memory":
-            hits = recall_relevant(args.get("query", ""))
+            q = args.get("query", "")
+            loop = asyncio.get_event_loop()
+            hits = await loop.run_in_executor(None, lambda: semantic.hybrid_recall(q, recall_relevant(q)))
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
