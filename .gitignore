@@ -35,3 +35,7 @@ config/persona.json
 memory/latency.jsonl
 memory/embeddings.json
 memory/pending_turns.json
+
+# Windows launcher logs
+logs/
+assets/moses.ico

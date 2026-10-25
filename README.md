@@ -30,8 +30,8 @@ A voice-activated AI desktop assistant powered by **Google Gemini Live** — wit
 
 ## Requirements
 
-- Ubuntu / Debian-based Linux (20.04+)
-- Python 3.10 or higher
+- **Linux:** Ubuntu / Debian-based (20.04+), Python 3.10 or higher
+- **Windows:** Windows 10 or 11 — the installer finds Python 3.12+ or offers to install it
 - A free **Google Gemini API key** — get one at https://aistudio.google.com/app/apikey
 - Microphone and speakers
 - Internet connection
@@ -40,7 +40,7 @@ A voice-activated AI desktop assistant powered by **Google Gemini Live** — wit
 
 ## Installation
 
-### One-command install
+### Linux — one-command install
 
 ```bash
 git clone https://github.com/contact219/moses-ai.git
@@ -56,6 +56,21 @@ The installer will:
 4. Install Playwright (Chromium browser automation)
 5. Create `config/api_keys.json` from the template
 6. Create a **Moses** desktop icon
+
+### Windows
+
+1. Download the repo (**Code → Download ZIP** and unzip it, or `git clone https://github.com/contact219/moses-ai.git`).
+2. Double-click **`install.bat`**.
+
+The installer will:
+1. Find Python 3.12+ (or offer to install Python 3.13 with `winget`)
+2. Create a Python virtual environment in `env\`
+3. Install the Windows packages from `requirements.txt`
+4. Install Playwright's Chromium browser
+5. Set up `config\api_keys.json` for Windows and ask for your Gemini API key
+6. Create a **Moses** shortcut on the Desktop and in the Start Menu
+
+The shortcut starts Moses without a console window and writes his log to `logs\moses.log`. To watch the log live (handy when something's wrong), run **`start_moses.bat`** instead.
 
 ---
 
@@ -79,7 +94,7 @@ Leave `os_system` as `linux`.
 
 ## Running Moses
 
-**Double-click the Moses icon** on your Desktop.
+**Double-click the Moses icon** on your Desktop (Windows: also in the Start Menu).
 
 Or from terminal:
 
