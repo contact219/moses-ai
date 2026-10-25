@@ -93,6 +93,16 @@ class Episodes(TempMemory):
                          ("They booked a flight.", ["travel", "houston", "plans"]))
         self.assertIsNone(mm.parse_episode("NONE"))
 
+    def test_episodes_say_how_long_ago(self):
+        from datetime import datetime
+        t = datetime(2026, 10, 25)
+        self.assertEqual(mm._ago("2026-10-25", t), "today")
+        self.assertEqual(mm._ago("2026-10-20", t), "5 days ago")
+        self.assertEqual(mm._ago("2026-07-08", t), "3 months ago")
+        mm.record_episode("They went fishing", [])
+        self.assertIn("(today)", mm.format_episodes_for_prompt())
+        self.assertNotIn("lately", mm.format_episodes_for_prompt())
+
     def test_fallback_keeps_their_words(self):
         self.assertIn("my knee hurts", mm.fallback_summary(["User: my knee hurts", "Moses: sorry"]))
 

@@ -418,10 +418,24 @@ def format_episodes_for_prompt(n: int = 8) -> str:
     episodes = load_episodes()
     if not episodes:
         return ""
-    lines = ["[RECENT HISTORY — things you did with them lately, reference naturally]"]
+    lines = ["[PAST SESSIONS — oldest first, with how long ago. Anything more than a few days old "
+             "is history, not news: never talk about it as if it's happening now. Reference naturally.]"]
     for ep in episodes[-n:]:
-        lines.append(f"  - {ep.get('date', '?')}: {ep.get('summary', '')}")
+        lines.append(f"  - {ep.get('date', '?')} ({_ago(ep.get('date', ''))}): {ep.get('summary', '')}")
     return "\n".join(lines) + "\n"
+
+
+def _ago(date: str, today: datetime | None = None) -> str:
+    try:
+        days = ((today or datetime.now()).date() - datetime.strptime(date, "%Y-%m-%d").date()).days
+    except Exception:
+        return "date unknown"
+    if days <= 0:  return "today"
+    if days == 1:  return "yesterday"
+    if days < 14:  return f"{days} days ago"
+    if days < 60:  return f"{days // 7} weeks ago"
+    if days < 730: return f"{days // 30} months ago"
+    return f"{days // 365} years ago"
 
 
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
