@@ -14,6 +14,7 @@ from google.genai import types
 from ui import MosesUI
 from core.text_utils import strip_markdown_for_speech
 from core.personas import get_persona, load_persona_key, save_persona_key
+from core import echo_cancel
 from core.turn_taking import (
     BargeDetector, LatencyTimer, chunk_peak, record_latency, latency_summary, duration_seconds,
 )
@@ -682,6 +683,10 @@ class MosesLive:
         self._swap_pending = False
         self._turn_active = False                # something of the current turn has arrived
         self._tools_running = 0
+        # ── live levels for the HUD (core/levels.py); a stub UI in tests has none ──
+        self._out_meter = getattr(ui, "out_meter", None)
+        self._mic_meter = getattr(ui, "mic_meter", None)
+        self._aec_done  = False
         # ── barge-in / echo gate / latency ──
         self._barge = BargeDetector()
         self._latency = LatencyTimer()
@@ -1125,6 +1130,8 @@ class MosesLive:
             muted = self.ui.muted
             now = time.monotonic()
             peak = chunk_peak(indata)
+            if self._mic_meter is not None and not muted:
+                self._mic_meter.feed(indata)
             # Voice barge-in: the mic is still WATCHED while he talks (it just
             # isn't sent), and sustained speech well above his own echo cuts
             # him off — the same move as talking over someone.
@@ -1153,6 +1160,7 @@ class MosesLive:
                 callback=callback,
             ):
                 print("[MOSES] 🎤 Mic stream open")
+                asyncio.create_task(self._route_aec())
                 while True:
                     await asyncio.sleep(0.1)
         except Exception as e:
@@ -1261,6 +1269,20 @@ class MosesLive:
             traceback.print_exc()
             raise
 
+    async def _route_aec(self):
+        """Once the mic and speaker streams exist, move them onto the
+        echo-cancelled pair (core/echo_cancel.py). Both streams reopen on every
+        reconnect, so this runs each time; it only reports the first."""
+        await asyncio.sleep(0.5)          # let the audio server register the stream
+        try:
+            mic, spk = await asyncio.to_thread(echo_cancel.route)
+        except Exception as e:
+            print(f"[MOSES] ⚠️ Echo cancellation routing: {e}")
+            return
+        if mic and spk and not self._aec_done:
+            self._aec_done = True
+            print("[MOSES] 🎧 Mic and voice are on the echo-cancelled pair")
+
     async def _play_audio(self):
         print("[MOSES] 🔊 Play started")
 
@@ -1276,6 +1298,7 @@ class MosesLive:
             device=spk_device,
         )
         stream.start()
+        asyncio.create_task(self._route_aec())
 
         try:
             while True:
@@ -1304,6 +1327,8 @@ class MosesLive:
                         record_latency(LATENCY_PATH, ms)
                         print(f"[MOSES] ⏱ reply after {ms / 1000:.2f}s")
                 self.set_speaking(True)
+                if self._out_meter is not None:
+                    self._out_meter.feed(chunk)
                 await asyncio.to_thread(stream.write, chunk)
         except Exception as e:
             print(f"[MOSES] ❌ Play: {e}")
@@ -1393,7 +1418,22 @@ class MosesLive:
             await asyncio.sleep(delay)
             delay = min(delay * 2, 15)
 
+def _already_running() -> bool:
+    """A second launch just brings the running Moses forward (see mosesctl.py)."""
+    try:
+        import mosesctl
+        return mosesctl.send("show") is not None
+    except Exception:
+        return False
+
+
 def main():
+    if _already_running():
+        print("Moses is already running — brought his window forward.")
+        return
+    import atexit
+    print(f"[MOSES] 🎧 Echo cancellation: {echo_cancel.enable()}")
+    atexit.register(echo_cancel.disable)
     ui = MosesUI(str(BASE_DIR / "moses.png"), persona_key=load_persona_key())
 
     def runner():
