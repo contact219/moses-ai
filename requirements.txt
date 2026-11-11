@@ -24,3 +24,5 @@ python-pptx
 python-docx
 pypdf
 pyqt6
+# Local wake word (core/wake_word.py). Optional: without it Moses is simply always listening.
+sherpa-onnx>=2.0

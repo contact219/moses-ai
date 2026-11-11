@@ -257,6 +257,7 @@ class PresenceCanvas(QOpenGLWidget):
         self.speaking = False
         self.state = "INITIALISING"
         self._label = "M.O.S.E.S"
+        self._name = "Moses"
         self.face = FaceSource(self)
         self._still_cache: tuple[int, QPixmap] | None = None
 
@@ -283,6 +284,7 @@ class PresenceCanvas(QOpenGLWidget):
     # persona / face ----------------------------------------------------------
     def set_persona(self, persona: dict):
         self._label = persona["title"]
+        self._name = persona["name"]
         self.face.set_persona(persona)
         self._still_cache = None
         self.update()
@@ -340,7 +342,8 @@ class PresenceCanvas(QOpenGLWidget):
         self._sm.step(self.out_meter, self.mic_meter, self.speaking, self.muted)
         thinking = 1.0 if (self.state in ("THINKING", "PROCESSING") and not self.speaking) else 0.0
         self._think += (thinking - self._think) * min(1.0, dt * 4)
-        self._dim += ((0.28 if self.muted else 1.0) - self._dim) * min(1.0, dt * 5)
+        resting = 0.28 if self.muted else (0.55 if self.state == "ASLEEP" else 1.0)
+        self._dim += (resting - self._dim) * min(1.0, dt * 5)
         self._spin += dt * (0.20 + 1.5 * self._think + 0.5 * self._sm.out)
         self._flow += dt * (0.012 + 0.75 * self._sm.out - 0.85 * self._sm.mic)
         self._ptr[0] += (self._ptr_to[0] - self._ptr[0]) * 0.06
@@ -433,6 +436,8 @@ class PresenceCanvas(QOpenGLWidget):
             txt, col = self.state, qcol(C.ACC2, 150 + 105 * (0.5 + 0.5 * math.sin(t * 5)))
         elif yours:
             txt, col = "HEARING YOU", qcol(C.WHITE)
+        elif self.state == "ASLEEP":
+            txt, col = f"SAY  “{self._name.upper()}”", qcol(C.TEXT_DIM, 210)
         else:
             txt, col = self.state, qcol(C.TEXT_MED, 190)
         font = QFont("Courier New", max(9, int(fw * 0.016)), QFont.Weight.Bold)
@@ -524,12 +529,14 @@ class OrbWindow(QWidget):
         accent = C.MUTED_C if self.muted else C.PRI
         live = max(self._sm.out, self._sm.mic)
         thinking = self.state in ("THINKING", "PROCESSING") and not self.speaking and not self.muted
+        asleep = self.state == "ASLEEP" and not self.muted
         r = ORB * 0.29 * (1.0 + 0.05 * self._sm.out)
 
         breathe = 0.5 + 0.5 * math.sin(t * 1.3)
         g = QRadialGradient(QPointF(cx, cy), ORB / 2)
-        g.setColorAt(0.0, qcol(accent, 120 + 110 * live))
-        g.setColorAt(0.45, qcol(accent, 40 + 16 * breathe + 80 * live))
+        rest = 0.35 if asleep else 1.0       # asleep: a slow, faint glow — here, not listening
+        g.setColorAt(0.0, qcol(accent, (120 + 110 * live) * rest))
+        g.setColorAt(0.45, qcol(accent, (40 + 16 * breathe + 80 * live) * rest))
         g.setColorAt(1.0, qcol(accent, 0))
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(g)
         p.drawEllipse(QPointF(cx, cy), ORB / 2, ORB / 2)
@@ -553,8 +560,11 @@ class OrbWindow(QWidget):
             p.drawEllipse(QPointF(cx, cy), r, r)
             p.setPen(QPen(qcol(C.MUTED_C), 3))
             p.drawLine(QPointF(cx - r * 0.45, cy + r * 0.45), QPointF(cx + r * 0.45, cy - r * 0.45))
+        if asleep:
+            p.setBrush(qcol(C.BG, 95)); p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QPointF(cx, cy), r, r)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(qcol(accent, 170 + 85 * live), 2.2))
+        p.setPen(QPen(qcol(accent, (170 + 85 * live) * (0.5 if asleep else 1.0)), 2.2))
         p.drawEllipse(QPointF(cx, cy), r, r)
 
     # mouse --------------------------------------------------------------------
@@ -607,9 +617,9 @@ def round_icon(face_path: str, ring: str) -> QIcon:
 
 
 def build_menu(parent, labels: dict, on: dict) -> QMenu:
-    """labels/on are keyed: show, mute, persona, orb, quit."""
+    """labels/on are keyed: show, mute, wake, persona, orb, quit."""
     m = QMenu(parent)
-    for key in ("show", "mute", "persona", "orb", None, "quit"):
+    for key in ("show", "mute", "wake", "persona", "orb", None, "quit"):
         if key is None:
             m.addSeparator(); continue
         act = QAction(labels[key], m)

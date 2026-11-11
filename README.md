@@ -127,11 +127,25 @@ env/bin/python mosesctl.py toggle|mute|talk|quiet|persona|orb|show|hide|quit
 
 On another desktop, bind any key to `mosesctl.py toggle` in its shortcut settings.
 
+### Wake word (optional)
+
+By default Moses is always listening: the microphone is streamed to Google whenever he is not speaking, and his instructions tell him to answer only when addressed. With the wake word on, a small recogniser on this machine listens instead, and **nothing leaves the computer until you say "Moses" or "Mina"**. He then stays with you for the conversation — you do not repeat his name each turn — and goes quiet again about ten seconds after it ends. The HUD shows `SAY "MOSES"` and the orb dims while he is not listening.
+
+```bash
+env/bin/python -m core.wake_word --install   # once: fetches the model (about 17 MB) into ~/.moses/models/kws
+env/bin/python -m core.wake_word --test      # 20 seconds: say the names a few times and see what it hears
+env/bin/python mosesctl.py wake              # switch it on or off (also in the orb / tray menu)
+env/bin/python mosesctl.py talk              # wake him without saying his name (worth binding to a key)
+```
+
+It is off until you switch it on, because only your voice on your microphone shows whether it hears you. Typing a line, or `mosesctl.py talk`, wakes him too.
+
 | Setting (environment variable) | Effect |
 |---|---|
 | `MOSES_HUD=classic` | The original painted HUD instead of the GPU scene |
 | `MOSES_ORB=0` | No orb (closing the window then quits, unless there is a tray icon) |
 | `MOSES_AEC=0` | No echo cancellation |
+| `MOSES_WAKE=1` / `MOSES_WAKE=0` | Force the wake word on or off for one run |
 | `QT_QPA_PLATFORM=wayland` | Native Wayland. On GNOME the orb then cannot stay on top or remember its place; by default Moses runs through X compatibility for that reason |
 
 ---
@@ -260,6 +274,7 @@ moses-ai/
 
 - **A living HUD.** The centre of the window is now a particle scene on the graphics card, in the visual language of the web landing page, and it is driven by the real audio: it swells with his voice, draws inward and turns white while you speak, tightens into rings while he thinks, dims when muted. The ring of bars around the portrait is the actual spectrum of whoever is talking. It slows down when nothing is happening and stops drawing when the window is hidden. Measured fullscreen at 3440×1440 on a Quadro K620: 50 fps (the monitor's limit) at roughly a quarter of the CPU the painted HUD used.
 - **The orb and shortcuts**, described under *Running Moses*.
+- **Wake word (optional, off by default).** A 3-million-parameter keyword spotter runs locally at under 2 ms per audio chunk; while he is asleep no audio is sent anywhere, and the two seconds around his name are kept so "Moses, what's the weather" arrives whole. On 30 natural-voice test lines it heard 29, and 26–30 with this room's recorded noise mixed in at any plausible speaking level; near-homophones ("mimosa", "minimum") can wake him, and 26 minutes of continuous nameless speech produced one false wake.
 - **Echo cancellation (Linux).** On start Moses asks PipeWire/PulseAudio for an echo-cancelled microphone and speaker pair and moves only his own audio onto it, so the mic no longer hears him through open speakers and talking over him is reliable without headphones. Your system's default devices are left as they were, and the pair is removed when he quits.
 
 Run the tests with `env/bin/python -m unittest discover -s tests`.
