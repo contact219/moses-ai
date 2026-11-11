@@ -14,9 +14,11 @@ from google.genai import types
 from ui import MosesUI
 from core.text_utils import strip_markdown_for_speech
 from core.personas import get_persona, load_persona_key, save_persona_key
-from core import echo_cancel
+from core import echo_cancel, wake_word
+from core.attention import Attention
 from core.turn_taking import (
     BargeDetector, LatencyTimer, chunk_peak, record_latency, latency_summary, duration_seconds,
+    VAD_SPEECH_PEAK,
 )
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
@@ -687,6 +689,14 @@ class MosesLive:
         self._out_meter = getattr(ui, "out_meter", None)
         self._mic_meter = getattr(ui, "mic_meter", None)
         self._aec_done  = False
+        # ── wake word: with it on, the mic is only streamed while he is awake ──
+        self._wake = None                        # core.wake_word.WakeWord, loaded with the mic
+        self._wake_tried = False
+        self._attn = Attention(enabled=False)
+        self._preroll: deque = deque(maxlen=int(2.0 * SEND_SAMPLE_RATE / CHUNK_SIZE))   # ~2 s, so "Moses, …" arrives whole
+        self._asleep_shown = False
+        if hasattr(ui, "on_wake"):
+            ui.on_wake = self.wake_now
         # ── barge-in / echo gate / latency ──
         self._barge = BargeDetector()
         self._latency = LatencyTimer()
@@ -699,6 +709,7 @@ class MosesLive:
         if not self._loop or not self.session:
             return
         self._latency.reset()   # a typed turn isn't a hands-free wait
+        self.wake_now()         # …and he should hear the spoken follow-up to it
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
@@ -706,6 +717,25 @@ class MosesLive:
             ),
             self._loop
         )
+
+    def wake_now(self):
+        """A shortcut, the orb or a typed line asked for him: same as saying his name."""
+        self._attn.wake(time.monotonic())
+        if self._attn.enabled:
+            print("[MOSES] 👂 Woken — listening")
+
+    def _woke(self, name: str, heard: list):
+        """On the event loop: send what was said around the name, and show he is listening."""
+        for chunk in heard:
+            self.out_queue.put_nowait(chunk)
+        print(f"[MOSES] 👂 Heard “{name}” — listening")
+        if not self._is_speaking and not self.ui.muted:
+            self.ui.set_state("LISTENING")
+
+    def _dozed(self):
+        print("[MOSES] 😴 Quiet — the mic stays local until his name")
+        if not self._is_speaking and not self.ui.muted:
+            self.ui.set_state("ASLEEP")
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
@@ -1132,13 +1162,36 @@ class MosesLive:
             peak = chunk_peak(indata)
             if self._mic_meter is not None and not muted:
                 self._mic_meter.feed(indata)
+            # Wake word. While he is replying or working he is awake by definition.
+            attn = self._attn
+            attn.enabled = self._wake is not None and getattr(self.ui, "wake_on", False)
+            if moses_speaking or vision_speaking or self._turn_active or self._tools_running:
+                attn.engaged(now)
             # Voice barge-in: the mic is still WATCHED while he talks (it just
             # isn't sent), and sustained speech well above his own echo cuts
             # him off — the same move as talking over someone.
             if self._barge.feed(peak, now * 1000, moses_speaking and not muted):
                 loop.call_soon_threadsafe(self._barge_in)
                 return
+            if attn.enabled and not muted and not attn.awake(now):
+                # Asleep: nothing leaves this machine. Keep the last two seconds
+                # so the words around his name reach him when he wakes.
+                self._preroll.append(indata.tobytes())
+                name = self._wake.feed(indata)
+                if name:
+                    attn.wake(now)
+                    heard = list(self._preroll)
+                    self._preroll.clear()
+                    self._asleep_shown = False
+                    loop.call_soon_threadsafe(self._woke, name, heard)
+                elif not self._asleep_shown:
+                    self._asleep_shown = True
+                    loop.call_soon_threadsafe(self._dozed)
+                return
+            self._asleep_shown = False
             if not moses_speaking and not vision_speaking and not muted and now >= self._mic_gate_until:
+                if peak >= VAD_SPEECH_PEAK:
+                    attn.heard_speech(now)
                 self._latency.note_sent(peak, frames * 1000 / SEND_SAMPLE_RATE, now * 1000)
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
@@ -1147,6 +1200,9 @@ class MosesLive:
                 )
 
         try:
+            if not self._wake_tried:
+                self._wake_tried = True
+                self._wake = await asyncio.to_thread(wake_word.load)
             from actions.devices import get_audio_device
             mic_device = get_audio_device("input")
             if mic_device is not None:

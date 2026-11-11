@@ -5,7 +5,8 @@ when it is not focused, so the desktop's own shortcut settings run this.
 
     mosesctl.py toggle      show / hide the HUD
     mosesctl.py mute        mute / unmute the microphone
-    mosesctl.py talk        make sure he is listening        (quiet: the opposite)
+    mosesctl.py talk        wake him and unmute, as if you said his name   (quiet: mute)
+    mosesctl.py wake        wake word on / off
     mosesctl.py persona     switch Moses <-> Mina
     mosesctl.py orb         show / hide the desktop orb
     mosesctl.py show | hide | quit
@@ -25,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-COMMANDS = ("toggle", "show", "hide", "mute", "talk", "quiet", "persona", "orb", "quit")
+COMMANDS = ("toggle", "show", "hide", "mute", "talk", "quiet", "wake", "persona", "orb", "quit")
 SHORTCUTS = (                     # (id, name, command, default key)
     ("moses-hud", "Moses: show / hide", "toggle", "<Control><Alt>m"),
     ("moses-mute", "Moses: mute / unmute", "mute", "<Control><Alt>space"),

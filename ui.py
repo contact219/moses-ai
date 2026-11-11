@@ -1096,6 +1096,13 @@ class MainWindow(QMainWindow):
         self._out_meter, self._mic_meter = out_meter, mic_meter
         self._quitting = False
         self._hide_told = False
+        self.on_wake = None                 # set by the voice loop: "pay attention now"
+        try:        # the wake word is opt-in: see core/wake_word.py
+            from memory.config_manager import get_config_value
+            from core.wake_word import switched_on
+            self.wake_on = switched_on(bool(get_config_value("wake_word", False)))
+        except Exception:
+            self.wake_on = False
         self.orb = None
         self._tray = None
         self._ctl = None
@@ -1231,10 +1238,12 @@ class MainWindow(QMainWindow):
             "show": "Hide the HUD" if shown else "Open the HUD",
             "mute": "Unmute microphone" if self._muted else "Mute microphone",
             "persona": f"Switch to {other}",
+            "wake": "Wake word: on  (listens only after his name)" if self.wake_on
+                    else "Wake word: off  (always listening)",
             "orb": "Hide the orb" if (self.orb and self.orb.isVisible()) else "Show the orb",
             "quit": f"Quit {self._persona['name']}",
         }, {
-            "show": self.toggle_hud, "mute": self._toggle_mute,
+            "show": self.toggle_hud, "mute": self._toggle_mute, "wake": self.toggle_wake_word,
             "persona": lambda: self._request_persona(other.lower()),
             "orb": self._toggle_orb, "quit": self.quit_app,
         })
@@ -1270,6 +1279,18 @@ class MainWindow(QMainWindow):
         if want != self.orb.isVisible():
             self.orb.setVisible(want)
 
+    def toggle_wake_word(self):
+        self.wake_on = not self.wake_on
+        try:
+            from memory.config_manager import set_config_value
+            set_config_value("wake_word", self.wake_on)
+        except Exception:
+            pass
+        self._log.append_log("SYS: Wake word on — the mic stays on this machine until you say his name."
+                             if self.wake_on else "SYS: Wake word off — always listening.")
+        if not self.wake_on and self.hud.state == "ASLEEP":
+            self._apply_state("LISTENING")
+
     def quit_app(self):
         self._quitting = True
         if self.orb:
@@ -1287,9 +1308,13 @@ class MainWindow(QMainWindow):
             self.hide()
         elif cmd == "mute":
             self._toggle_mute()
-        elif cmd == "talk":                      # make sure he is listening
+        elif cmd == "talk":                      # make sure he is listening, awake and unmuted
             if self._muted:
                 self._toggle_mute()
+            if self.on_wake:
+                self.on_wake()
+        elif cmd == "wake":
+            self.toggle_wake_word()
         elif cmd == "quiet":
             if not self._muted:
                 self._toggle_mute()
@@ -1844,6 +1869,18 @@ class MosesUI:
     @on_persona_switch.setter
     def on_persona_switch(self, cb):
         self._win.on_persona_switch = cb
+
+    @property
+    def wake_on(self) -> bool:
+        return self._win.wake_on
+
+    @property
+    def on_wake(self):
+        return self._win.on_wake
+
+    @on_wake.setter
+    def on_wake(self, cb):
+        self._win.on_wake = cb
 
     def set_persona(self, key: str):
         """Thread-safe: re-theme the window for Moses or Mina."""
