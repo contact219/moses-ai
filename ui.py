@@ -37,6 +37,7 @@ def _base_dir() -> Path:
 BASE_DIR   = _base_dir()
 sys.path.insert(0, str(BASE_DIR))
 from core.personas import PERSONAS, get_persona  # noqa: E402
+from core.levels import AudioMeter  # noqa: E402
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
 
@@ -1088,9 +1089,16 @@ class MainWindow(QMainWindow):
 
     _persona_sig = pyqtSignal(str)
 
-    def __init__(self, face_path: str, persona_key: str = "moses"):
+    def __init__(self, face_path: str, persona_key: str = "moses", out_meter=None, mic_meter=None):
         super().__init__()
         self._persona = get_persona("moses")   # the window is built in Moses's palette, then switched
+        self._face_path = face_path
+        self._out_meter, self._mic_meter = out_meter, mic_meter
+        self._quitting = False
+        self._hide_told = False
+        self.orb = None
+        self._tray = None
+        self._ctl = None
         self.on_persona_switch = None
         self.setWindowTitle("Moses — Model Optimized Smart Expert System")
         self.setMinimumSize(_MIN_W, _MIN_H)
@@ -1122,7 +1130,8 @@ class MainWindow(QMainWindow):
         self._left_panel = self._build_left_panel()
         body.addWidget(self._left_panel, stretch=0)
 
-        self.hud = HudCanvas(face_path)
+        self._body = body
+        self.hud = self._make_hud()
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         body.addWidget(self.hud, stretch=5)
 
@@ -1162,8 +1171,164 @@ class MainWindow(QMainWindow):
         self._persona_sig.connect(self.set_persona)
         self.hud.set_persona(self._persona)
         self._style_persona_btns()
+        self._build_presence()
         if persona_key != "moses":
             self.set_persona(persona_key)
+
+    # ── presence: GPU scene, orb, tray, control channel ─────────────────────
+    def _make_hud(self):
+        """The GPU scene, unless it is switched off (MOSES_HUD=classic) or unavailable."""
+        if os.environ.get("MOSES_HUD", "").lower() != "classic":
+            try:
+                from ui_presence import PresenceCanvas
+                hud = PresenceCanvas(C, self._out_meter, self._mic_meter)
+                hud.failed.connect(self._use_classic_hud)
+                return hud
+            except Exception as e:
+                print(f"[MOSES] ⚠️ Presence scene unavailable, using the classic HUD: {e}")
+        return HudCanvas(self._face_path)
+
+    def _use_classic_hud(self):
+        old = self.hud
+        if isinstance(old, HudCanvas):
+            return
+        new = HudCanvas(self._face_path)
+        new.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        new.muted, new.speaking, new.state = old.muted, old.speaking, old.state
+        new.set_persona(self._persona)
+        self._body.replaceWidget(old, new)
+        old.deleteLater()
+        self.hud = new
+
+    def _build_presence(self):
+        """The orb and tray icon that keep Moses on the desktop when this window
+        is closed, and the socket a keyboard shortcut talks to (mosesctl.py)."""
+        try:
+            import ui_presence as up
+        except Exception as e:
+            print(f"[MOSES] ⚠️ Orb unavailable: {e}")
+            return
+        if os.environ.get("MOSES_ORB", "1") != "0":
+            self.orb = up.OrbWindow(C, self._out_meter, self._mic_meter, store=CONFIG_DIR / "orb.json")
+            self.orb.set_persona(self._persona)
+            self.orb.clicked.connect(self.toggle_hud)
+            self.orb.mute_requested.connect(self._toggle_mute)
+            self.orb.menu_requested.connect(lambda pos: self._presence_menu().exec(pos))
+        self._tray = up.make_tray(self, up.round_icon(str(self._persona["face"]), C.PRI))
+        if self._tray:
+            self._tray.setToolTip(self._persona["name"])
+            self._tray.activated.connect(self._on_tray)
+        self._ctl = up.ControlServer(self)
+        if self._ctl.ok:
+            self._ctl.command.connect(self.handle_command)
+        QApplication.instance().aboutToQuit.connect(self._ctl.close)
+
+    def _presence_menu(self):
+        import ui_presence as up
+        other = "Mina" if self._persona["key"] == "moses" else "Moses"
+        shown = self.isVisible() and not self.isMinimized()
+        return up.build_menu(self, {
+            "show": "Hide the HUD" if shown else "Open the HUD",
+            "mute": "Unmute microphone" if self._muted else "Mute microphone",
+            "persona": f"Switch to {other}",
+            "orb": "Hide the orb" if (self.orb and self.orb.isVisible()) else "Show the orb",
+            "quit": f"Quit {self._persona['name']}",
+        }, {
+            "show": self.toggle_hud, "mute": self._toggle_mute,
+            "persona": lambda: self._request_persona(other.lower()),
+            "orb": self._toggle_orb, "quit": self.quit_app,
+        })
+
+    def _on_tray(self, reason):
+        from PyQt6.QtWidgets import QSystemTrayIcon
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle_hud()
+        else:
+            from PyQt6.QtGui import QCursor
+            self._presence_menu().exec(QCursor.pos())
+
+    def toggle_hud(self):
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.show_hud()
+
+    def show_hud(self):
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show(); self.raise_(); self.activateWindow()
+
+    def _toggle_orb(self):
+        if self.orb:
+            self._orb_off = self.orb.isVisible()
+            self._sync_orb()
+
+    def _sync_orb(self):
+        """The orb stands in for the window: shown whenever the HUD is hidden or minimised."""
+        if not self.orb:
+            return
+        want = (not self.isVisible() or self.isMinimized()) and not getattr(self, "_orb_off", False)
+        if want != self.orb.isVisible():
+            self.orb.setVisible(want)
+
+    def quit_app(self):
+        self._quitting = True
+        if self.orb:
+            self.orb.close()
+        QApplication.instance().quit()
+
+    def handle_command(self, cmd: str):
+        """From mosesctl.py (a desktop keyboard shortcut) — see README."""
+        cmd = cmd.strip().lower()
+        if cmd == "toggle":
+            self.toggle_hud()
+        elif cmd == "show":
+            self.show_hud()
+        elif cmd == "hide":
+            self.hide()
+        elif cmd == "mute":
+            self._toggle_mute()
+        elif cmd == "talk":                      # make sure he is listening
+            if self._muted:
+                self._toggle_mute()
+        elif cmd == "quiet":
+            if not self._muted:
+                self._toggle_mute()
+        elif cmd == "persona":
+            self._request_persona("mina" if self._persona["key"] == "moses" else "moses")
+        elif cmd == "orb":
+            self._toggle_orb()
+        elif cmd == "quit":
+            self.quit_app()
+
+    def closeEvent(self, event):
+        """Closing the window leaves Moses running behind the orb / tray icon.
+        Quit from their menu. With neither available, closing quits as before."""
+        stays = (self.orb is not None and not getattr(self, "_orb_off", False)) or self._tray is not None
+        if self._quitting or not stays:
+            self._quitting = True
+            if self.orb:
+                self.orb.close()
+            event.accept()
+            QApplication.instance().quit()
+            return
+        event.ignore()
+        self.hide()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_orb()
+        if not self._hide_told and not self._quitting:
+            self._hide_told = True
+            self._log.append_log(f"SYS: {self._persona['name']} is still here — click the orb, or quit from its menu.")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_orb()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange:
+            self._sync_orb()
 
     # ── persona ─────────────────────────────────────────────────────────────
     def _request_persona(self, key: str):
@@ -1188,6 +1353,12 @@ class MainWindow(QMainWindow):
         self._footer_lbl.setText(f"{new['name']}  ·  {new['subtitle']}")
         self.hud.set_persona(new)
         self._style_persona_btns()
+        if self.orb:
+            self.orb.set_persona(new)
+        if self._tray:
+            from ui_presence import round_icon
+            self._tray.setIcon(round_icon(str(new["face"]), C.PRI))
+            self._tray.setToolTip(new["name"])
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -1527,6 +1698,8 @@ class MainWindow(QMainWindow):
     def _toggle_mute(self):
         self._muted = not self._muted
         self.hud.muted = self._muted
+        if self.orb:
+            self.orb.muted = self._muted
         self._style_mute_btn()
         if self._muted:
             self._apply_state("MUTED")
@@ -1575,6 +1748,9 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        if self.orb:
+            self.orb.state    = state
+            self.orb.speaking = (state == "SPEAKING")
 
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
@@ -1621,9 +1797,19 @@ class _RootShim:
 
 class MosesUI:
     def __init__(self, face_path: str, size=None, persona_key: str = "moses"):
+        # GNOME on Wayland gives an app no way to keep a window on top or place
+        # it, which the orb needs. Running through X compatibility does; say
+        # QT_QPA_PLATFORM=wayland to opt out.
+        if (QApplication.instance() is None and "QT_QPA_PLATFORM" not in os.environ
+                and os.environ.get("XDG_SESSION_TYPE") == "wayland" and os.environ.get("DISPLAY")):
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
-        self._win = MainWindow(face_path, persona_key)
+        self._app.setQuitOnLastWindowClosed(False)   # the orb keeps him running; see MainWindow.closeEvent
+        # What the HUD draws: the audio actually played and heard (core/levels.py).
+        self.out_meter = AudioMeter(24000)
+        self.mic_meter = AudioMeter(16000)
+        self._win = MainWindow(face_path, persona_key, self.out_meter, self.mic_meter)
         self._win.show()
         self.root = _RootShim(self._app)
 

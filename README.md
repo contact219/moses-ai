@@ -103,6 +103,37 @@ cd /path/to/moses-ai
 ./start_jarvis.sh
 ```
 
+Launching a second time brings the running Moses forward instead of starting another.
+
+### The orb, the tray icon and keyboard shortcuts
+
+Closing the window does **not** quit Moses. He stays on the desktop as a small orb (always on top, drag it anywhere) and a tray icon, still listening.
+
+| On the orb | Does |
+|---|---|
+| Click | Open / hide the HUD |
+| Middle-click | Mute / unmute |
+| Right-click | Menu: open, mute, switch persona, hide the orb, **quit** |
+
+The orb moves with the audio: his colour while he speaks, white while he hears you, two amber arcs while he thinks, struck through when muted.
+
+To reach him from any app, `mosesctl.py` sends a command to the running Moses, and your desktop's keyboard settings run it:
+
+```bash
+env/bin/python mosesctl.py --install-shortcuts   # GNOME: Ctrl+Alt+M show/hide, Ctrl+Alt+Space mute/unmute
+env/bin/python mosesctl.py --remove-shortcuts
+env/bin/python mosesctl.py toggle|mute|talk|quiet|persona|orb|show|hide|quit
+```
+
+On another desktop, bind any key to `mosesctl.py toggle` in its shortcut settings.
+
+| Setting (environment variable) | Effect |
+|---|---|
+| `MOSES_HUD=classic` | The original painted HUD instead of the GPU scene |
+| `MOSES_ORB=0` | No orb (closing the window then quits, unless there is a tray icon) |
+| `MOSES_AEC=0` | No echo cancellation |
+| `QT_QPA_PLATFORM=wayland` | Native Wayland. On GNOME the orb then cannot stay on top or remember its place; by default Moses runs through X compatibility for that reason |
+
 ---
 
 ## First Launch
@@ -224,6 +255,12 @@ moses-ai/
 - **Mina.** A second persona with her own voice (Aoede), portrait, talking-face video, colour theme and prompt. Moses keeps his Charon voice. Switch by voice, button or F6; the swap waits for a natural pause, and the last few exchanges carry across.
 - **Memory.** Protected categories (identity, health, relationships) and anything marked critical are never trimmed. `forget_memory` really deletes, across facts and past sessions. Turns are saved as they happen, so a crash doesn't lose them. Sessions are distilled into tagged episodes, shown with how long ago they happened so old news isn't treated as current. Recall adds meaning-based matches (gemini-embedding-2) as a fallback to keyword search.
 - **How he talks.** The web app's conversation rules: short spoken turns, takes a side instead of both-sidesing, doesn't invent details of your life, and doesn't end every turn on a question. For heavy moments he gives his honest read and one small next step, and never steers you toward just moving on. Good news gets what it means for you, not a pat on the head.
+
+### What's new — a presence on the desktop
+
+- **A living HUD.** The centre of the window is now a particle scene on the graphics card, in the visual language of the web landing page, and it is driven by the real audio: it swells with his voice, draws inward and turns white while you speak, tightens into rings while he thinks, dims when muted. The ring of bars around the portrait is the actual spectrum of whoever is talking. It slows down when nothing is happening and stops drawing when the window is hidden. Measured fullscreen at 3440×1440 on a Quadro K620: 50 fps (the monitor's limit) at roughly a quarter of the CPU the painted HUD used.
+- **The orb and shortcuts**, described under *Running Moses*.
+- **Echo cancellation (Linux).** On start Moses asks PipeWire/PulseAudio for an echo-cancelled microphone and speaker pair and moves only his own audio onto it, so the mic no longer hears him through open speakers and talking over him is reliable without headphones. Your system's default devices are left as they were, and the pair is removed when he quits.
 
 Run the tests with `env/bin/python -m unittest discover -s tests`.
 
