@@ -78,6 +78,15 @@ class RouteTest(unittest.TestCase):
         with mock.patch.object(ec, "_pactl", lambda *a, **k: ""):
             self.assertEqual(ec.route(pid=1), (False, False))
 
+    def test_a_leftover_pair_is_adopted_so_it_is_removed_on_exit(self):
+        mods = f"7\tmodule-echo-cancel\tsource_name={ec.SOURCE} sink_name={ec.SINK}\n"
+        with mock.patch.object(ec, "available", lambda: True), \
+             mock.patch.object(ec, "_pactl", lambda *a, **k: mods if a[:3] == ("list", "short", "modules") else ""):
+            ec._loaded_module = None
+            self.assertTrue(ec.enable().startswith("on"))
+            self.assertEqual(ec._loaded_module, "7")
+        ec._loaded_module = None
+
     def test_switched_off_by_environment(self):
         with mock.patch.dict(os.environ, {"MOSES_AEC": "0"}), mock.patch.object(ec, "_pactl") as pactl:
             self.assertFalse(ec.available())

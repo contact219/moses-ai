@@ -54,7 +54,10 @@ def _rgb(h: str) -> tuple[float, float, float]:
 
 
 def control_socket_path() -> str:
-    """Where a running Moses listens for mosesctl. Per-user, never on disk for long."""
+    """Where a running Moses listens for mosesctl. Per-user, never on disk for long.
+    MOSES_SOCKET gives a test run its own, so it can never touch the real one."""
+    if os.environ.get("MOSES_SOCKET"):
+        return os.environ["MOSES_SOCKET"]
     base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.path.expanduser("~"), ".moses")
     os.makedirs(base, exist_ok=True)
     return os.path.join(base, "moses-hud.sock")
@@ -601,6 +604,63 @@ class OrbWindow(QWidget):
         self.menu_requested.emit(e.globalPos())
 
 
+# ── what he was shown ────────────────────────────────────────────────────────
+
+class PeekWindow(QWidget):
+    """A thumbnail of the screenshot he was just handed, beside the orb, so it
+    is never a surprise what he saw. Fades on its own; click it to dismiss."""
+
+    W = 300
+
+    def __init__(self, theme):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setWindowTitle("Moses peek")
+        self.C = theme
+        self._px: QPixmap | None = None
+        self._caption = ""
+        self._hide = QTimer(self); self._hide.setSingleShot(True); self._hide.timeout.connect(self.hide)
+
+    def show_image(self, jpeg: bytes, caption: str, anchor: QWidget | None = None, seconds: float = 6.0):
+        px = QPixmap(); px.loadFromData(jpeg, "JPG")
+        if px.isNull():
+            return
+        self._px = px.scaledToWidth(self.W - 16, Qt.TransformationMode.SmoothTransformation)
+        self._caption = caption
+        self.setFixedSize(self.W, self._px.height() + 44)
+        geo = QGuiApplication.primaryScreen().availableGeometry()
+        if anchor is not None and anchor.isVisible():
+            x = anchor.x() + anchor.width() // 2 - self.width() // 2
+            y = anchor.y() - self.height() - 8
+        else:
+            x, y = geo.right() - self.width() - 28, geo.bottom() - self.height() - 28
+        self.move(max(geo.left() + 8, min(x, geo.right() - self.width() - 8)), max(geo.top() + 8, y))
+        self.show(); self.raise_(); self.update()
+        self._hide.start(int(seconds * 1000))
+
+    def paintEvent(self, _):
+        if self._px is None:
+            return
+        C = self.C
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        path = QPainterPath(); path.addRoundedRect(r, 12, 12)
+        p.fillPath(path, qcol(C.PANEL, 240))
+        p.setPen(QPen(qcol(C.PRI, 200), 1.5)); p.drawPath(path)
+        img = QRectF(8, 8, self._px.width(), self._px.height())
+        clip = QPainterPath(); clip.addRoundedRect(img, 6, 6)
+        p.save(); p.setClipPath(clip); p.drawPixmap(img.topLeft(), self._px); p.restore()
+        font = QFont(); font.setPointSize(9); font.setBold(True)
+        p.setFont(font); p.setPen(qcol(C.TEXT))
+        p.drawText(QRectF(10, img.bottom() + 6, self.width() - 20, 24),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "👀  " + self._caption)
+
+    def mousePressEvent(self, e):
+        self.hide()
+
+
 # ── tray + menu ──────────────────────────────────────────────────────────────
 
 def round_icon(face_path: str, ring: str) -> QIcon:
@@ -617,9 +677,9 @@ def round_icon(face_path: str, ring: str) -> QIcon:
 
 
 def build_menu(parent, labels: dict, on: dict) -> QMenu:
-    """labels/on are keyed: show, mute, wake, persona, orb, quit."""
+    """labels/on are keyed: show, look, mute, wake, persona, orb, quit."""
     m = QMenu(parent)
-    for key in ("show", "mute", "wake", "persona", "orb", None, "quit"):
+    for key in ("show", "look", "mute", "wake", "persona", "orb", None, "quit"):
         if key is None:
             m.addSeparator(); continue
         act = QAction(labels[key], m)

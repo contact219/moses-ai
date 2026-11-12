@@ -116,6 +116,13 @@ def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]
         return img_bytes, f"image/{source_format.lower()}"
 
 def _capture_screen() -> tuple[bytes, str]:
+    # core.screen_capture goes through the desktop's screenshot portal on
+    # Wayland, where mss can only return a black frame.
+    try:
+        from core import screen_capture
+        return screen_capture.capture(), "image/jpeg"
+    except ImportError:
+        pass
 
     if not _MSS:
         raise RuntimeError("mss is not installed. Run: pip install mss")

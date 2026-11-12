@@ -93,8 +93,13 @@ def enable() -> str:
     global _loaded_module
     if not available():
         return "off (not available on this system)"
-    if _module_id():
-        return "on (already loaded)"
+    existing = _module_id()
+    if existing:
+        # Only one Moses runs at a time (main.py checks first), so this is left
+        # over from a run that ended without cleaning up: adopt it, so it is
+        # removed when this one quits.
+        _loaded_module = existing
+        return "on (reusing the pair from an earlier run)"
     default_sink = (_pactl("get-default-sink") or "").strip()
     default_source = (_pactl("get-default-source") or "").strip()
     sources = [r[1] for r in parse_short(_pactl("list", "short", "sources")) if len(r) > 1]
