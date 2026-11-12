@@ -17,7 +17,8 @@ from core.personas import get_persona, load_persona_key, save_persona_key
 from core import echo_cancel, notes, wake_word
 from core.attention import Attention
 from core.turn_taking import (
-    BargeDetector, LatencyTimer, chunk_peak, record_latency, latency_summary, duration_seconds,
+    BargeDetector, LatencyTimer, chunk_peak, record_latency, latency_summary, recent_latencies,
+    duration_seconds,
     VAD_SPEECH_PEAK,
 )
 from memory.memory_manager import (
@@ -722,6 +723,9 @@ class MosesLive:
             ui.on_wake = self.wake_now
         if hasattr(ui, "on_look"):
             ui.on_look = self.look_at
+        if hasattr(ui, "on_memory_changed"):
+            ui.on_memory_changed = self.memory_changed
+        self._fresh_pending = False              # memory edited by hand: next session starts fresh
         # ── barge-in / echo gate / latency ──
         self._barge = BargeDetector()
         self._latency = LatencyTimer()
@@ -1157,6 +1161,28 @@ class MosesLive:
             self._maybe_swap_now()   # mid-reply: _turn_active holds it until turn_complete
         return f"Handing over to {target['name']} now."
 
+    def memory_changed(self):
+        """From the Qt thread: the memory panel was closed after changes."""
+        semantic.refresh_in_background()        # recall must not find what was deleted
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._queue_fresh)
+        else:
+            self._fresh_pending = True
+
+    def _queue_fresh(self):
+        self._fresh_pending = True
+        if self._swap_event is not None:
+            self._swap_pending = True
+            self._maybe_swap_now()              # at once if quiet, else when this reply ends
+
+    def _report_latency(self, ms, history=None):
+        report = getattr(self.ui, "report_latency", None)
+        if report:
+            try:
+                report(ms, latency_summary(LATENCY_PATH), history)
+            except Exception as e:
+                print(f"[MOSES] ⚠️ reply meter: {e}")
+
     def _on_ui_persona_switch(self, key: str):
         """Called from the Qt thread when a persona button is clicked."""
         if self._loop:
@@ -1440,6 +1466,7 @@ class MosesLive:
                     if ms is not None:
                         record_latency(LATENCY_PATH, ms)
                         print(f"[MOSES] ⏱ reply after {ms / 1000:.2f}s")
+                        self._report_latency(ms)
                 self.set_speaking(True)
                 if self._out_meter is not None:
                     self._out_meter.feed(chunk)
@@ -1461,6 +1488,7 @@ class MosesLive:
         if summary:
             print(f"[MOSES] ⏱ hands-free replies, last 7 days: median {summary['p50'] / 1000:.2f}s, "
                   f"slowest 10% {summary['p90'] / 1000:.2f}s over {summary['turns']} turns")
+        self._report_latency(None, recent_latencies(LATENCY_PATH))
 
         delay = 1.5      # backoff after a failure; a planned swap reconnects at once
         swap = False
@@ -1472,6 +1500,13 @@ class MosesLive:
                 # A resume that keeps dying before any reply is a handle Google won't
                 # take any more: start fresh, carrying the recent exchanges instead.
                 self._apply_pending_switch()
+                if self._fresh_pending:
+                    # Memory was edited by hand. A resumed session keeps the memory it
+                    # started with, so start fresh — new memory, the recent exchanges carried.
+                    self._fresh_pending = False
+                    self._resume_handle = None
+                    self._carried = _carried_block(list(self._recent))
+                    print("[MOSES] 🧠 Memory edited — fresh session with the new memory")
                 if self._resume_handle and self._resume_failures >= 2:
                     print("[MOSES] ⚠️ Resume refused twice — starting a fresh session with recent context")
                     self._resume_handle = None

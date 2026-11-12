@@ -124,7 +124,8 @@ def record_latency(path: Path, ms: int) -> None:
         print(f"[MOSES] ⚠️ latency record failed: {e}")
 
 
-def latency_summary(path: Path, days: int = 7) -> dict | None:
+def _recorded(path: Path, days: float) -> list[int] | None:
+    """Every measured turn of the last `days`, oldest first; None if nothing was ever recorded."""
     cutoff = time.time() - days * 86400
     vals = []
     try:
@@ -137,6 +138,16 @@ def latency_summary(path: Path, days: int = 7) -> dict | None:
                 continue
     except FileNotFoundError:
         return None
+    return vals
+
+
+def recent_latencies(path: Path, n: int = 24, days: int = 7) -> list[int]:
+    """The last n measured turns, oldest first — what the HUD's reply meter starts with."""
+    return (_recorded(path, days) or [])[-n:]
+
+
+def latency_summary(path: Path, days: int = 7) -> dict | None:
+    vals = _recorded(path, days)
     if not vals:
         return None
     vals.sort()

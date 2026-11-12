@@ -606,6 +606,89 @@ class OrbWindow(QWidget):
 
 # ── what he was shown ────────────────────────────────────────────────────────
 
+class ReplyMeter(QWidget):
+    """How long you waited to hear him: the last reply, a bar for each recent
+    one, and the week's median. Measured from the end of your speech to his
+    first audible sound (core/turn_taking.LatencyTimer); typed turns aren't
+    counted. Green under 1.5 s, amber to 3 s, red beyond."""
+
+    KEEP = 24
+    FAST_MS, SLOW_MS, SCALE_MS = 1500, 3000, 4000
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self.C = theme
+        self.history: list[int] = []
+        self.summary: dict | None = None
+        self._flash = 0.0
+        self._fade = QTimer(self); self._fade.timeout.connect(self._tick)
+        self.setFixedHeight(84)
+        self.setMinimumWidth(80)
+        self.setToolTip("Reply time: from when you stop talking to when you hear him.")
+
+    def colour(self, ms: int) -> QColor:
+        C = self.C
+        return qcol(C.GREEN if ms < self.FAST_MS else C.ACC if ms < self.SLOW_MS else C.RED)
+
+    def set_data(self, ms: int | None, summary: dict | None, history: list[int] | None = None):
+        if history is not None:
+            self.history = list(history)[-self.KEEP:]
+        if ms is not None:
+            self.history = (self.history + [int(ms)])[-self.KEEP:]
+            self._flash = 1.0
+            self._fade.start(40)
+        self.summary = summary
+        self.update()
+
+    def _tick(self):
+        self._flash = max(0.0, self._flash - 0.04)
+        if self._flash == 0.0:
+            self._fade.stop()
+        self.update()
+
+    def paintEvent(self, _):
+        C = self.C
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+        p.setBrush(qcol(C.PANEL2)); p.setPen(QPen(qcol(C.BORDER_A), 1))
+        p.drawRoundedRect(QRectF(1, 1, W - 2, H - 2), 4, 4)
+
+        p.setFont(QFont("Courier New", 7, QFont.Weight.Bold)); p.setPen(qcol(C.TEXT_DIM))
+        p.drawText(QRectF(8, 5, 60, 14), Qt.AlignmentFlag.AlignVCenter, "REPLY")
+        last = self.history[-1] if self.history else None
+        p.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        col = self.colour(last) if last is not None else qcol(C.TEXT_DIM)
+        label = f"{last / 1000:.2f}s" if last is not None else "--"
+        right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        p.setPen(QPen(col, 1))
+        p.drawText(QRectF(0, 4, W - 6, 16), right, label)
+        if self._flash:                     # a new reply: the number glows white, then settles
+            p.setPen(QPen(qcol(C.WHITE, int(255 * self._flash)), 1))
+            p.drawText(QRectF(0, 4, W - 6, 16), right, label)
+
+        # one bar per recent reply, newest on the right; the dashed line is 1.5 s
+        x0, x1, top, base = 8, W - 8, 24, H - 20
+        n = self.KEEP
+        slot = (x1 - x0) / n
+        fast_y = base - (base - top) * self.FAST_MS / self.SCALE_MS
+        p.setPen(QPen(qcol(C.BORDER_B), 1, Qt.PenStyle.DashLine))
+        p.drawLine(QLineF(x0, fast_y, x1, fast_y))
+        p.setPen(Qt.PenStyle.NoPen)
+        for i, ms in enumerate(self.history):
+            h = max(2.0, (base - top) * min(ms, self.SCALE_MS) / self.SCALE_MS)
+            x = x1 - (len(self.history) - i) * slot
+            c = self.colour(ms)
+            c.setAlpha(255 if i == len(self.history) - 1 else 150)
+            p.setBrush(c)
+            p.drawRoundedRect(QRectF(x + 1, base - h, max(1.5, slot - 2), h), 1, 1)
+
+        p.setFont(QFont("Courier New", 7)); p.setPen(qcol(C.TEXT_DIM))
+        s = self.summary
+        foot = (f"MED {s['p50'] / 1000:.1f}s · P90 {s['p90'] / 1000:.1f}s · 7D" if s else "NO SPOKEN TURNS YET")
+        p.drawText(QRectF(8, H - 17, W - 16, 14), Qt.AlignmentFlag.AlignVCenter, foot)
+        p.end()
+
+
 class PeekWindow(QWidget):
     """A thumbnail of the screenshot he was just handed, beside the orb, so it
     is never a surprise what he saw. Fades on its own; click it to dismiss."""
@@ -796,9 +879,9 @@ def round_icon(face_path: str, ring: str) -> QIcon:
 
 
 def build_menu(parent, labels: dict, on: dict) -> QMenu:
-    """labels/on are keyed: show, look, notes, mute, wake, persona, orb, quit."""
+    """labels/on are keyed: show, look, notes, memory, mute, wake, persona, orb, quit."""
     m = QMenu(parent)
-    for key in ("show", "look", "notes", "mute", "wake", "persona", "orb", None, "quit"):
+    for key in ("show", "look", "notes", "memory", "mute", "wake", "persona", "orb", None, "quit"):
         if key is None:
             m.addSeparator(); continue
         act = QAction(labels[key], m)

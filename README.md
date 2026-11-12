@@ -113,7 +113,7 @@ Closing the window does **not** quit Moses. He stays on the desktop as a small o
 |---|---|
 | Click | Open / hide the HUD |
 | Middle-click | Mute / unmute |
-| Right-click | Menu: open, look at my screen, recent notes, mute, wake word, switch persona, hide the orb, **quit** |
+| Right-click | Menu: open, look at my screen, recent notes, what he remembers, mute, wake word, switch persona, hide the orb, **quit** |
 
 The orb moves with the audio: his colour while he speaks, white while he hears you, two amber arcs while he thinks, struck through when muted.
 
@@ -122,7 +122,7 @@ To reach him from any app, `mosesctl.py` sends a command to the running Moses, a
 ```bash
 env/bin/python mosesctl.py --install-shortcuts   # GNOME: Ctrl+Alt+M show/hide, Ctrl+Alt+Space mute, Ctrl+Alt+L look at my screen
 env/bin/python mosesctl.py --remove-shortcuts
-env/bin/python mosesctl.py toggle|look|notes|mute|talk|quiet|wake|persona|orb|show|hide|quit
+env/bin/python mosesctl.py toggle|look|notes|memory|mute|talk|quiet|wake|persona|orb|show|hide|quit
 ```
 
 On another desktop, bind any key to `mosesctl.py toggle` in its shortcut settings.
@@ -136,6 +136,20 @@ On Wayland the picture is taken through the desktop's screenshot portal; GNOME a
 ### Note cards
 
 When something is better read or copied than heard — an address, a phone number, a list, a confirmation code, a text to send, or the exact line to say — Moses puts it on screen as a card beside the orb, and says so briefly instead of reading it all out. Each card has **Copy** (lines to say get *Copy line*), can be dragged anywhere, and stays until you close it (× or Esc). Up to four are shown at once; every note is also saved to `memory/notes.json`, and *Show recent notes* in the orb menu (or `mosesctl.py notes`) brings the last three back.
+
+### What he remembers
+
+**F8**, the *MEMORY* button, *What Moses remembers…* in the orb menu, or `mosesctl.py memory` opens everything Moses and Mina know about you, exactly as it is stored: facts grouped by *who you are*, *people in your life*, *health*, *what you like* and so on, and a second tab of past conversations, newest first. Search finds a memory by any of its words (Ctrl+F).
+
+- **Edit** corrects a fact or a conversation summary in place (Ctrl+Enter saves, Esc cancels).
+- **Delete** forgets it at once; **Undo** (or Ctrl+Z) puts it back exactly for a few seconds.
+- **Keep always** stops an ordinary fact from being trimmed when memory runs short. Who you are, your health and your people are always kept anyway.
+
+He reads memory when a conversation starts, so closing the window after a change starts him on a fresh session with the new memory, carrying the last few exchanges so the conversation goes on. Deleted things also leave the recall index, so he cannot look them up.
+
+### Reply time
+
+The *REPLY* meter under the system monitor shows how long you waited to hear him — from the end of your sentence to his first sound — for the last reply and as a bar for each of the recent ones: green under 1.5 s, amber to 3 s, red beyond. Underneath are the week's median and slowest-10% times. Only spoken turns are measured; typed ones are not. Every measurement is kept in `memory/latency.jsonl`.
 
 ### Wake word (optional)
 

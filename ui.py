@@ -1089,6 +1089,7 @@ class MainWindow(QMainWindow):
 
     _persona_sig = pyqtSignal(str)
     _note_sig    = pyqtSignal(dict)
+    _latency_sig = pyqtSignal(object)
 
     def __init__(self, face_path: str, persona_key: str = "moses", out_meter=None, mic_meter=None):
         super().__init__()
@@ -1099,6 +1100,8 @@ class MainWindow(QMainWindow):
         self._hide_told = False
         self.on_wake = None                 # set by the voice loop: "pay attention now"
         self.on_look = None                 # set by the voice loop: hand him a screenshot
+        self.on_memory_changed = None       # set by the voice loop: memory was edited by hand
+        self._memory_panel = None
         self._cards: list = []              # note cards on screen, oldest first
         self._peek = None                   # thumbnail of what he was shown
         self._looking = False
@@ -1179,9 +1182,12 @@ class MainWindow(QMainWindow):
         sc_persona = QShortcut(QKeySequence("F6"), self)
         sc_persona.activated.connect(
             lambda: self._request_persona("mina" if self._persona["key"] == "moses" else "moses"))
+        sc_memory = QShortcut(QKeySequence("F8"), self)
+        sc_memory.activated.connect(self.show_memory)
 
         self._persona_sig.connect(self.set_persona)
         self._note_sig.connect(self._show_note)
+        self._latency_sig.connect(self._show_latency)
         self.hud.set_persona(self._persona)
         self._style_persona_btns()
         self._build_presence()
@@ -1248,10 +1254,11 @@ class MainWindow(QMainWindow):
                     else "Wake word: off  (always listening)",
             "look": "Look at my screen   (Ctrl+Alt+L)",
             "notes": "Show recent notes",
+            "memory": f"What {self._persona['name']} remembers…   (F8)",
             "orb": "Hide the orb" if (self.orb and self.orb.isVisible()) else "Show the orb",
             "quit": f"Quit {self._persona['name']}",
         }, {
-            "look": self.look_at_screen, "notes": self.show_recent_notes,
+            "look": self.look_at_screen, "notes": self.show_recent_notes, "memory": self.show_memory,
             "show": self.toggle_hud, "mute": self._toggle_mute, "wake": self.toggle_wake_word,
             "persona": lambda: self._request_persona(other.lower()),
             "orb": self._toggle_orb, "quit": self.quit_app,
@@ -1376,6 +1383,28 @@ class MainWindow(QMainWindow):
         for n in recent:
             self._show_note(n)
 
+    # ── memory panel ────────────────────────────────────────────────────────
+    def show_memory(self):
+        try:
+            import ui_memory
+        except Exception as e:
+            self._log.append_log(f"SYS: The memory panel couldn't open — {e}")
+            return
+        if self._memory_panel is None:
+            self._memory_panel = ui_memory.MemoryPanel(C, self._persona["name"])
+            self._memory_panel.closed_with_changes.connect(self._memory_edited)
+        self._memory_panel.open_for(self._persona["name"])
+
+    def _memory_edited(self):
+        self._log.append_log(f"SYS: Memory updated — {self._persona['name']} picks it up from here.")
+        if self.on_memory_changed:
+            self.on_memory_changed()
+
+    # ── reply time ──────────────────────────────────────────────────────────
+    def _show_latency(self, payload):
+        if self._reply_meter is not None:
+            self._reply_meter.set_data(*payload)
+
     def toggle_wake_word(self):
         self.wake_on = not self.wake_on
         try:
@@ -1416,6 +1445,8 @@ class MainWindow(QMainWindow):
             self.look_at_screen()
         elif cmd == "notes":
             self.show_recent_notes()
+        elif cmd == "memory":
+            self.show_memory()
         elif cmd == "quiet":
             if not self._muted:
                 self._toggle_mute()
@@ -1658,6 +1689,14 @@ class MainWindow(QMainWindow):
         ip_lay.addWidget(os_lbl)
 
         lay.addWidget(info_panel)
+
+        self._reply_meter = None
+        try:
+            from ui_presence import ReplyMeter
+            self._reply_meter = ReplyMeter(C)
+            lay.addWidget(self._reply_meter)
+        except Exception as e:
+            print(f"[MOSES] ⚠️ Reply meter unavailable: {e}")
         lay.addStretch()
 
         for txt, col in [
@@ -1736,6 +1775,23 @@ class MainWindow(QMainWindow):
         self._style_mute_btn()
         lay.addWidget(self._mute_btn)
 
+        mem_btn = QPushButton("◈  MEMORY  [F8]")
+        mem_btn.setToolTip("See, correct or delete what Moses and Mina remember about you")
+        mem_btn.setFixedHeight(26)
+        mem_btn.setFont(QFont("Courier New", 7))
+        mem_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        mem_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px;
+            }}
+            QPushButton:hover {{
+                color: {C.PRI}; border: 1px solid {C.BORDER_B};
+            }}
+        """)
+        mem_btn.clicked.connect(self.show_memory)
+        lay.addWidget(mem_btn)
+
         fs_btn = QPushButton("⛶  FULLSCREEN  [F11]")
         fs_btn.setFixedHeight(26)
         fs_btn.setFont(QFont("Courier New", 7))
@@ -1796,7 +1852,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_fl("[F4] Mute  ·  [F6] Moses/Mina  ·  [F11] Fullscreen"))
+        lay.addWidget(_fl("[F4] Mute  ·  [F6] Moses/Mina  ·  [F8] Memory  ·  [F11] Fullscreen"))
         lay.addStretch()
         self._footer_lbl = _fl("Moses  ·  Model Optimized Smart Expert System")
         lay.addWidget(self._footer_lbl)
@@ -1999,6 +2055,18 @@ class MosesUI:
     def show_note(self, note: dict):
         """Thread-safe: put a note card on screen."""
         self._win._note_sig.emit(note)
+
+    def report_latency(self, ms: int | None, summary: dict | None, history: list[int] | None = None):
+        """Thread-safe: a reply was heard after ms (None: just the history/summary)."""
+        self._win._latency_sig.emit((ms, summary, history))
+
+    @property
+    def on_memory_changed(self):
+        return self._win.on_memory_changed
+
+    @on_memory_changed.setter
+    def on_memory_changed(self, cb):
+        self._win.on_memory_changed = cb
 
     def set_persona(self, key: str):
         """Thread-safe: re-theme the window for Moses or Mina."""

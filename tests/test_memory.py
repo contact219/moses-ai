@@ -124,5 +124,44 @@ class Hybrid(unittest.TestCase):
             sem.search = orig
 
 
+class ByHand(TempMemory):
+    """The memory panel: what they change is exactly what is kept."""
+
+    def test_an_edit_replaces_the_value_and_can_clear_the_mark(self):
+        mm.save_fact("preferences", "coffee", "black", importance="critical")
+        mm.edit_fact("preferences", "coffee", "  oat milk latte  ")
+        e = mm.load_memory()["preferences"]["coffee"]
+        self.assertEqual(e["value"], "oat milk latte")
+        self.assertNotIn("importance", e, "an edit by hand may demote, unlike the model's saves")
+        mm.edit_fact("preferences", "coffee", "oat milk latte", importance="critical")
+        self.assertEqual(mm.load_memory()["preferences"]["coffee"]["importance"], "critical")
+
+    def test_an_empty_edit_is_refused_and_changes_nothing(self):
+        mm.save_fact("notes", "gate_code", "4411")
+        with self.assertRaises(ValueError):
+            mm.edit_fact("notes", "gate_code", "   ")
+        self.assertEqual(mm.load_memory()["notes"]["gate_code"]["value"], "4411")
+
+    def test_delete_takes_only_that_fact(self):
+        mm.save_fact("relationships", "brother", "Marcus")
+        mm.save_fact("relationships", "sister", "Dana")
+        self.assertTrue(mm.delete_fact("relationships", "brother"))
+        self.assertFalse(mm.delete_fact("relationships", "brother"))
+        self.assertEqual(list(mm.load_memory()["relationships"]), ["sister"])
+        self.assertEqual(mm.forget("sister", "relationships"), "Forgotten: relationships/sister")
+
+    def test_episodes_are_edited_and_deleted_one_at_a_time(self):
+        mm.record_episode("They talked about the move to Houston.", ["move"])
+        mm.record_episode("They talked about the move to Austin.", ["move"])
+        first, second = mm.load_episodes()
+        self.assertTrue(mm.edit_episode(first, "They decided against Houston."))
+        self.assertEqual(mm.load_episodes()[0]["summary"], "They decided against Houston.")
+        self.assertFalse(mm.delete_episode(first), "the old text no longer matches anything")
+        self.assertTrue(mm.delete_episode(second))
+        self.assertEqual([e["summary"] for e in mm.load_episodes()], ["They decided against Houston."])
+        with self.assertRaises(ValueError):
+            mm.edit_episode(mm.load_episodes()[0], "")
+
+
 if __name__ == "__main__":
     unittest.main()
