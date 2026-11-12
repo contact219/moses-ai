@@ -14,7 +14,7 @@ from google.genai import types
 from ui import MosesUI
 from core.text_utils import strip_markdown_for_speech
 from core.personas import get_persona, load_persona_key, save_persona_key
-from core import echo_cancel, wake_word
+from core import echo_cancel, notes, wake_word
 from core.attention import Attention
 from core.turn_taking import (
     BargeDetector, LatencyTimer, chunk_peak, record_latency, latency_summary, duration_seconds,
@@ -532,6 +532,24 @@ TOOL_DECLARATIONS = [
     }
 },
     {
+        "name": "show_note",
+        "description": (
+            "Put something on the user's screen as a card they can copy and keep: an address, a phone "
+            "number, a list, directions, a confirmation code, a message to send someone, or a line for "
+            "them to say. Use it whenever what they need is better read or copied than heard. The card "
+            "has a Copy button and is saved, so they can bring it back later."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "title": {"type": "STRING", "description": "A few words: what this is"},
+                "body":  {"type": "STRING", "description": "The exact text to show, ready to copy"},
+                "kind":  {"type": "STRING", "description": "note (default), or line when it is words for them to say or send"},
+            },
+            "required": ["body"],
+        },
+    },
+    {
         "name": "save_memory",
         "description": (
             "Save an important personal fact about the user to long-term memory. "
@@ -1035,6 +1053,18 @@ class MosesLive:
 
             elif name == "switch_persona":
                 result = self._queue_switch(args.get("persona", ""))
+
+            elif name == "show_note":
+                try:
+                    note = notes.add(args.get("title", ""), args.get("body", ""), args.get("kind", "note"))
+                except ValueError as e:
+                    result = f"Nothing shown: {e}."
+                else:
+                    if hasattr(self.ui, "show_note"):
+                        self.ui.show_note(note)
+                    self.ui.write_log(f"SYS: 📝 {note['title']}")
+                    result = ("It's on their screen as a card with a Copy button, and saved — they can bring "
+                              "it back from the orb menu. Don't read it out unless they ask.")
 
             elif name == "shutdown_moses":
                 self.ui.write_log("SYS: Shutdown requested.")

@@ -1088,6 +1088,7 @@ class MainWindow(QMainWindow):
     _state_sig = pyqtSignal(str)
 
     _persona_sig = pyqtSignal(str)
+    _note_sig    = pyqtSignal(dict)
 
     def __init__(self, face_path: str, persona_key: str = "moses", out_meter=None, mic_meter=None):
         super().__init__()
@@ -1098,6 +1099,7 @@ class MainWindow(QMainWindow):
         self._hide_told = False
         self.on_wake = None                 # set by the voice loop: "pay attention now"
         self.on_look = None                 # set by the voice loop: hand him a screenshot
+        self._cards: list = []              # note cards on screen, oldest first
         self._peek = None                   # thumbnail of what he was shown
         self._looking = False
         try:        # the wake word is opt-in: see core/wake_word.py
@@ -1179,6 +1181,7 @@ class MainWindow(QMainWindow):
             lambda: self._request_persona("mina" if self._persona["key"] == "moses" else "moses"))
 
         self._persona_sig.connect(self.set_persona)
+        self._note_sig.connect(self._show_note)
         self.hud.set_persona(self._persona)
         self._style_persona_btns()
         self._build_presence()
@@ -1244,10 +1247,11 @@ class MainWindow(QMainWindow):
             "wake": "Wake word: on  (listens only after his name)" if self.wake_on
                     else "Wake word: off  (always listening)",
             "look": "Look at my screen   (Ctrl+Alt+L)",
+            "notes": "Show recent notes",
             "orb": "Hide the orb" if (self.orb and self.orb.isVisible()) else "Show the orb",
             "quit": f"Quit {self._persona['name']}",
         }, {
-            "look": self.look_at_screen,
+            "look": self.look_at_screen, "notes": self.show_recent_notes,
             "show": self.toggle_hud, "mute": self._toggle_mute, "wake": self.toggle_wake_word,
             "persona": lambda: self._request_persona(other.lower()),
             "orb": self._toggle_orb, "quit": self.quit_app,
@@ -1325,6 +1329,53 @@ class MainWindow(QMainWindow):
         else:
             self._log.append_log("SYS: Not connected yet — try again in a moment.")
 
+    # ── note cards ──────────────────────────────────────────────────────────
+    MAX_CARDS = 4
+
+    def _show_note(self, note: dict):
+        import ui_presence as up
+        for c in self._cards:                     # the same note again: bring it forward
+            if c.note.get("id") == note.get("id"):
+                c.flash(); return
+        card = up.NoteCard(C, note, self._persona["name"])
+        card.closed.connect(self._card_closed)
+        card.copied.connect(lambda title: self._log.append_log(f"SYS: Copied “{title}”."))
+        self._cards.append(card)
+        while len(self._cards) > self.MAX_CARDS:
+            self._cards[0].close()
+        self._stack_cards()
+        card.show()
+
+    def _card_closed(self, card):
+        if card in self._cards:
+            self._cards.remove(card)
+            self._stack_cards()
+
+    def _stack_cards(self):
+        """Newest at the bottom, just above the orb; older ones above it. A card
+        the user has dragged somewhere stays where they put it."""
+        from PyQt6.QtGui import QGuiApplication
+        geo = QGuiApplication.primaryScreen().availableGeometry()
+        right = geo.right() - 24
+        bottom = (self.orb.y() - 10) if (self.orb and self.orb.isVisible()) else geo.bottom() - 24
+        for card in reversed(self._cards):
+            if card.moved:
+                continue
+            card.adjustSize()
+            top = bottom - card.height()
+            if top < geo.top() + 8:
+                top = geo.top() + 8
+            card.move(right - card.width(), top)
+            bottom = top - 10
+
+    def show_recent_notes(self):
+        from core import notes
+        recent = notes.recent(3)
+        if not recent:
+            self._log.append_log("SYS: No notes yet."); return
+        for n in recent:
+            self._show_note(n)
+
     def toggle_wake_word(self):
         self.wake_on = not self.wake_on
         try:
@@ -1363,6 +1414,8 @@ class MainWindow(QMainWindow):
             self.toggle_wake_word()
         elif cmd == "look":
             self.look_at_screen()
+        elif cmd == "notes":
+            self.show_recent_notes()
         elif cmd == "quiet":
             if not self._muted:
                 self._toggle_mute()
@@ -1942,6 +1995,10 @@ class MosesUI:
     @on_wake.setter
     def on_wake(self, cb):
         self._win.on_wake = cb
+
+    def show_note(self, note: dict):
+        """Thread-safe: put a note card on screen."""
+        self._win._note_sig.emit(note)
 
     def set_persona(self, key: str):
         """Thread-safe: re-theme the window for Moses or Mina."""
