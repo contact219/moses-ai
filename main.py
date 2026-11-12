@@ -84,6 +84,11 @@ SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 LATENCY_PATH        = BASE_DIR / "memory" / "latency.jsonl"
+# Sent with the screenshot when the user presses "look at this". Plain words:
+# this model tends to repeat vivid instruction wording out loud.
+LOOK_PROMPT = ("[Look at this — it's my screen right now. Tell me what matters in it, the way a friend "
+               "glancing over my shoulder would, in a sentence or two; don't read it all out or describe it "
+               "like a caption. If it isn't clear what I want, ask.]")
 POST_SPEECH_GATE_S  = 0.4   # mic stays muted a beat after he stops: speaker tail / room echo
 DROP_REPLY_MAX_S    = 8     # a cut reply still generating after this: swap connections to end it
 RECENT_TURNS        = 12    # exchanges carried verbatim if a session must restart fresh
@@ -697,6 +702,8 @@ class MosesLive:
         self._asleep_shown = False
         if hasattr(ui, "on_wake"):
             ui.on_wake = self.wake_now
+        if hasattr(ui, "on_look"):
+            ui.on_look = self.look_at
         # ── barge-in / echo gate / latency ──
         self._barge = BargeDetector()
         self._latency = LatencyTimer()
@@ -716,6 +723,27 @@ class MosesLive:
                 turn_complete=True
             ),
             self._loop
+        )
+
+    def look_at(self, jpeg: bytes):
+        """The "look at this" key: hand him the screen, inside a turn — the
+        live model ignores pictures sent as a video frame, but sees one sent
+        with the words. Thread-safe."""
+        if not self._loop or not self.session:
+            self.ui.write_log("SYS: Not connected yet — try again in a moment.")
+            return
+        self.wake_now()
+        self._latency.reset()
+        print(f"[MOSES] 👀 Looking at the screen ({len(jpeg) // 1024} KB)")
+        asyncio.run_coroutine_threadsafe(
+            self.session.send_client_content(
+                turns={"role": "user", "parts": [
+                    {"inline_data": {"mime_type": "image/jpeg", "data": jpeg}},
+                    {"text": LOOK_PROMPT},
+                ]},
+                turn_complete=True,
+            ),
+            self._loop,
         )
 
     def wake_now(self):

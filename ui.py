@@ -1097,6 +1097,9 @@ class MainWindow(QMainWindow):
         self._quitting = False
         self._hide_told = False
         self.on_wake = None                 # set by the voice loop: "pay attention now"
+        self.on_look = None                 # set by the voice loop: hand him a screenshot
+        self._peek = None                   # thumbnail of what he was shown
+        self._looking = False
         try:        # the wake word is opt-in: see core/wake_word.py
             from memory.config_manager import get_config_value
             from core.wake_word import switched_on
@@ -1240,9 +1243,11 @@ class MainWindow(QMainWindow):
             "persona": f"Switch to {other}",
             "wake": "Wake word: on  (listens only after his name)" if self.wake_on
                     else "Wake word: off  (always listening)",
+            "look": "Look at my screen   (Ctrl+Alt+L)",
             "orb": "Hide the orb" if (self.orb and self.orb.isVisible()) else "Show the orb",
             "quit": f"Quit {self._persona['name']}",
         }, {
+            "look": self.look_at_screen,
             "show": self.toggle_hud, "mute": self._toggle_mute, "wake": self.toggle_wake_word,
             "persona": lambda: self._request_persona(other.lower()),
             "orb": self._toggle_orb, "quit": self.quit_app,
@@ -1278,6 +1283,47 @@ class MainWindow(QMainWindow):
         want = (not self.isVisible() or self.isMinimized()) and not getattr(self, "_orb_off", False)
         if want != self.orb.isVisible():
             self.orb.setVisible(want)
+
+    def look_at_screen(self):
+        """Screenshot → thumbnail → to him. The orb and the last thumbnail step
+        aside for the capture so he sees the screen, not himself."""
+        if self._looking:
+            return
+        self._looking = True
+        hidden = [w for w in (self.orb, self._peek) if w is not None and w.isVisible()]
+        for w in hidden:
+            w.hide()
+        QTimer.singleShot(180, lambda: self._do_look(hidden))
+
+    def _do_look(self, hidden):
+        from core import screen_capture
+        try:
+            jpeg = screen_capture.capture()
+        except Exception as e:
+            self._log.append_log(f"SYS: Couldn't capture the screen — {e}")
+            print(f"[MOSES] ⚠️ Look at this: {e}")
+            jpeg = None
+        finally:
+            for w in hidden:
+                if w is self.orb:
+                    self._sync_orb()
+                else:
+                    w.show()
+            self._looking = False
+        if jpeg is None:
+            return
+        try:
+            import ui_presence as up
+            if self._peek is None:
+                self._peek = up.PeekWindow(C)
+            self._peek.show_image(jpeg, f"{self._persona['name']} is looking at this", self.orb)
+        except Exception as e:
+            print(f"[MOSES] ⚠️ Thumbnail: {e}")
+        self._log.append_log(f"You: [showed {self._persona['name']} the screen]")
+        if self.on_look:
+            threading.Thread(target=self.on_look, args=(jpeg,), daemon=True).start()
+        else:
+            self._log.append_log("SYS: Not connected yet — try again in a moment.")
 
     def toggle_wake_word(self):
         self.wake_on = not self.wake_on
@@ -1315,6 +1361,8 @@ class MainWindow(QMainWindow):
                 self.on_wake()
         elif cmd == "wake":
             self.toggle_wake_word()
+        elif cmd == "look":
+            self.look_at_screen()
         elif cmd == "quiet":
             if not self._muted:
                 self._toggle_mute()
@@ -1835,6 +1883,11 @@ class MosesUI:
         self.out_meter = AudioMeter(24000)
         self.mic_meter = AudioMeter(16000)
         self._win = MainWindow(face_path, persona_key, self.out_meter, self.mic_meter)
+        try:                                     # lets the screen tools capture from any thread
+            from core import screen_capture
+            screen_capture.install_bridge()
+        except Exception as e:
+            print(f"[MOSES] ⚠️ Screen capture unavailable: {e}")
         self._win.show()
         self.root = _RootShim(self._app)
 
@@ -1873,6 +1926,14 @@ class MosesUI:
     @property
     def wake_on(self) -> bool:
         return self._win.wake_on
+
+    @property
+    def on_look(self):
+        return self._win.on_look
+
+    @on_look.setter
+    def on_look(self, cb):
+        self._win.on_look = cb
 
     @property
     def on_wake(self):

@@ -10,6 +10,12 @@ import mosesctl
 
 
 class ControlTest(unittest.TestCase):
+    def test_a_test_socket_keeps_away_from_the_real_one(self):
+        import ui_presence
+        with mock.patch.dict(os.environ, {"MOSES_SOCKET": "/tmp/x/test.sock"}):
+            self.assertEqual(mosesctl.socket_path(), "/tmp/x/test.sock")
+            self.assertEqual(ui_presence.control_socket_path(), "/tmp/x/test.sock")
+
     def test_not_running_is_reported_not_raised(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": d}):
             self.assertIsNone(mosesctl.send("toggle"))

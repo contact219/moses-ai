@@ -4,6 +4,7 @@ shortcut reaches him. GNOME on Wayland does not let an app listen for keys
 when it is not focused, so the desktop's own shortcut settings run this.
 
     mosesctl.py toggle      show / hide the HUD
+    mosesctl.py look        show him the screen: "look at this"
     mosesctl.py mute        mute / unmute the microphone
     mosesctl.py talk        wake him and unmute, as if you said his name   (quiet: mute)
     mosesctl.py wake        wake word on / off
@@ -26,16 +27,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-COMMANDS = ("toggle", "show", "hide", "mute", "talk", "quiet", "wake", "persona", "orb", "quit")
+COMMANDS = ("toggle", "show", "hide", "look", "mute", "talk", "quiet", "wake", "persona", "orb", "quit")
 SHORTCUTS = (                     # (id, name, command, default key)
     ("moses-hud", "Moses: show / hide", "toggle", "<Control><Alt>m"),
     ("moses-mute", "Moses: mute / unmute", "mute", "<Control><Alt>space"),
+    ("moses-look", "Moses: look at my screen", "look", "<Control><Alt>l"),
 )
 _KEYS = "org.gnome.settings-daemon.plugins.media-keys"
 _BASE = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
 
 
 def socket_path() -> str:
+    if os.environ.get("MOSES_SOCKET"):          # a test run's own socket (see ui_presence.control_socket_path)
+        return os.environ["MOSES_SOCKET"]
     base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.path.expanduser("~"), ".moses")
     return os.path.join(base, "moses-hud.sock")
 
