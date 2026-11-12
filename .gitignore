@@ -16,6 +16,7 @@ config/orb.json
 # Personal memory — generated at runtime, not shared
 memory/long_term.json
 memory/episodes.json
+memory/notes.json
 
 # Runtime artifacts
 screenshot.png

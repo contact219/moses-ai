@@ -661,6 +661,125 @@ class PeekWindow(QWidget):
         self.hide()
 
 
+# ── note cards ───────────────────────────────────────────────────────────────
+
+class NoteCard(QWidget):
+    """Something he handed you: stays on top until you close it. Copy puts the
+    text on the clipboard; drag the card anywhere; Esc or × closes it."""
+
+    closed = pyqtSignal(object)
+    copied = pyqtSignal(str)
+    W = 340
+
+    def __init__(self, theme, note: dict, who: str):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
+        from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle("Moses note")
+        self.C, self.note = theme, note
+        self.moved = False
+        self._press: QPoint | None = None
+        self._glow = 0.0
+        line = note.get("kind") == "line"
+        C = theme
+        self.setFixedWidth(self.W)
+
+        lay = QVBoxLayout(self); lay.setContentsMargins(18, 14, 14, 14); lay.setSpacing(8)
+        head = QHBoxLayout(); head.setSpacing(8)
+        tag = QLabel("SAY THIS" if line else "NOTE")
+        tag.setStyleSheet(f"color:{C.PRI}; font: 700 9pt; letter-spacing: 2px; background: transparent;")
+        title = QLabel(note.get("title", "Note"))
+        title.setStyleSheet(f"color:{C.WHITE}; font: 700 11pt; background: transparent;")
+        title.setWordWrap(True)
+        x = QPushButton("×"); x.setFixedSize(24, 24); x.setCursor(Qt.CursorShape.PointingHandCursor)
+        x.setToolTip("Close (Esc)")
+        x.setStyleSheet(f"QPushButton{{color:{C.TEXT_DIM}; background:transparent; border:none; font: 15pt;}}"
+                        f"QPushButton:hover{{color:{C.WHITE};}}")
+        x.clicked.connect(self.close)
+        head.addWidget(tag); head.addWidget(title, 1); head.addWidget(x, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(head)
+
+        body = QLabel(note.get("body", ""))
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.setCursor(Qt.CursorShape.IBeamCursor)
+        if line:
+            body.setStyleSheet(f"color:{C.WHITE}; font: italic 14pt 'Georgia'; background: transparent;"
+                               f" border-left: 2px solid {C.PRI}; padding: 2px 0 2px 12px;")
+        else:
+            body.setStyleSheet(f"color:{C.TEXT}; font: 11pt; background: transparent;")
+        lay.addWidget(body)
+
+        foot = QHBoxLayout()
+        meta = QLabel(f"{who} · {note.get('created', '')[-5:]}")
+        meta.setStyleSheet(f"color:{C.TEXT_DIM}; font: 8pt; background: transparent;")
+        self._copy = QPushButton("Copy line" if line else "Copy")
+        self._copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy.setStyleSheet(
+            f"QPushButton{{color:{C.PRI}; background:transparent; border:1px solid {C.BORDER_B};"
+            f" border-radius: 12px; padding: 3px 14px; font: 700 9pt;}}"
+            f"QPushButton:hover{{border-color:{C.PRI};}}")
+        self._copy.clicked.connect(self._do_copy)
+        foot.addWidget(meta); foot.addStretch(1); foot.addWidget(self._copy)
+        lay.addLayout(foot)
+
+        self._fade = QTimer(self); self._fade.timeout.connect(self._tick)
+        self._relabel = QTimer(self); self._relabel.setSingleShot(True)
+        self._relabel.timeout.connect(lambda: self._copy.setText("Copy line" if line else "Copy"))
+        self.flash()
+
+    def _do_copy(self):
+        QGuiApplication.clipboard().setText(self.note.get("body", ""))
+        self._copy.setText("Copied ✓")
+        self._relabel.start(1600)          # owned by the card: closing it in the meantime is safe
+        self.copied.emit(self.note.get("title", ""))
+
+    def flash(self):
+        """A brief glow on the border: here's a new one (or this one again)."""
+        self._glow = 1.0
+        self._fade.start(30)
+        self.raise_()
+
+    def _tick(self):
+        self._glow = max(0.0, self._glow - 0.03)
+        if self._glow == 0.0:
+            self._fade.stop()
+        self.update()
+
+    def paintEvent(self, _):
+        C = self.C
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        path = QPainterPath(); path.addRoundedRect(r, 14, 14)
+        p.fillPath(path, qcol(C.PANEL, 245))
+        p.setPen(QPen(qcol(C.PRI, 110 + 145 * self._glow), 1.4 + 1.6 * self._glow)); p.drawPath(path)
+        p.fillRect(QRectF(1, 18, 3, self.height() - 36), qcol(C.PRI, 200))
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._press = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e):
+        if self._press is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            self.move(e.globalPosition().toPoint() - self._press)
+            self.moved = True
+
+    def mouseReleaseEvent(self, e):
+        self._press = None
+
+    def closeEvent(self, e):
+        self.closed.emit(self)
+        super().closeEvent(e)
+
+
 # ── tray + menu ──────────────────────────────────────────────────────────────
 
 def round_icon(face_path: str, ring: str) -> QIcon:
@@ -677,9 +796,9 @@ def round_icon(face_path: str, ring: str) -> QIcon:
 
 
 def build_menu(parent, labels: dict, on: dict) -> QMenu:
-    """labels/on are keyed: show, look, mute, wake, persona, orb, quit."""
+    """labels/on are keyed: show, look, notes, mute, wake, persona, orb, quit."""
     m = QMenu(parent)
-    for key in ("show", "look", "mute", "wake", "persona", "orb", None, "quit"):
+    for key in ("show", "look", "notes", "mute", "wake", "persona", "orb", None, "quit"):
         if key is None:
             m.addSeparator(); continue
         act = QAction(labels[key], m)

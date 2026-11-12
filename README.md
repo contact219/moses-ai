@@ -113,7 +113,7 @@ Closing the window does **not** quit Moses. He stays on the desktop as a small o
 |---|---|
 | Click | Open / hide the HUD |
 | Middle-click | Mute / unmute |
-| Right-click | Menu: open, look at my screen, mute, wake word, switch persona, hide the orb, **quit** |
+| Right-click | Menu: open, look at my screen, recent notes, mute, wake word, switch persona, hide the orb, **quit** |
 
 The orb moves with the audio: his colour while he speaks, white while he hears you, two amber arcs while he thinks, struck through when muted.
 
@@ -122,7 +122,7 @@ To reach him from any app, `mosesctl.py` sends a command to the running Moses, a
 ```bash
 env/bin/python mosesctl.py --install-shortcuts   # GNOME: Ctrl+Alt+M show/hide, Ctrl+Alt+Space mute, Ctrl+Alt+L look at my screen
 env/bin/python mosesctl.py --remove-shortcuts
-env/bin/python mosesctl.py toggle|look|mute|talk|quiet|wake|persona|orb|show|hide|quit
+env/bin/python mosesctl.py toggle|look|notes|mute|talk|quiet|wake|persona|orb|show|hide|quit
 ```
 
 On another desktop, bind any key to `mosesctl.py toggle` in its shortcut settings.
@@ -132,6 +132,10 @@ On another desktop, bind any key to `mosesctl.py toggle` in its shortcut setting
 Press **Ctrl+Alt+L** (or *Look at my screen* in the orb menu) and Moses sees what is on your screen and responds to it — an error message, a chart, a page you are reading. A thumbnail beside the orb shows exactly what he was given; the orb steps out of the way for the capture. It also wakes him if the wake word is on.
 
 On Wayland the picture is taken through the desktop's screenshot portal; GNOME asks once whether to allow it. (The older capture returned an all-black image under Wayland, so his *what's on my screen?* tool now uses the same route.) Each capture is read and deleted from `~/Pictures` straight away.
+
+### Note cards
+
+When something is better read or copied than heard — an address, a phone number, a list, a confirmation code, a text to send, or the exact line to say — Moses puts it on screen as a card beside the orb, and says so briefly instead of reading it all out. Each card has **Copy** (lines to say get *Copy line*), can be dragged anywhere, and stays until you close it (× or Esc). Up to four are shown at once; every note is also saved to `memory/notes.json`, and *Show recent notes* in the orb menu (or `mosesctl.py notes`) brings the last three back.
 
 ### Wake word (optional)
 
@@ -280,6 +284,7 @@ moses-ai/
 
 - **A living HUD.** The centre of the window is now a particle scene on the graphics card, in the visual language of the web landing page, and it is driven by the real audio: it swells with his voice, draws inward and turns white while you speak, tightens into rings while he thinks, dims when muted. The ring of bars around the portrait is the actual spectrum of whoever is talking. It slows down when nothing is happening and stops drawing when the window is hidden. Measured fullscreen at 3440×1440 on a Quadro K620: 50 fps (the monitor's limit) at roughly a quarter of the CPU the painted HUD used.
 - **The orb and shortcuts**, described under *Running Moses*.
+- **Note cards** (the web app's `show_note`, as floating cards). Probed on the live model with both prompts: a card every time for an address, a shopping list, a text for the landlord and a line to say, and never for chat or a rough day (22/22 after one rule was tightened — the first run once said "here's a list you can copy" without making one).
 - **"Look at this" (Ctrl+Alt+L).** The screen goes to him as part of a turn, the only way the live model reliably sees a picture (sent as a video frame it described a cat and a dog that weren't there). Captured through the screenshot portal on Wayland, about 1.8 s; tested with a known picture on screen (0.99 match) and in the running app, where he answered out loud about it.
 - **Wake word (optional, off by default).** A 3-million-parameter keyword spotter runs locally at under 2 ms per audio chunk; while he is asleep no audio is sent anywhere, and the two seconds around his name are kept so "Moses, what's the weather" arrives whole. On 30 natural-voice test lines it heard 29, and 26–30 with this room's recorded noise mixed in at any plausible speaking level; near-homophones ("mimosa", "minimum") can wake him, and 26 minutes of continuous nameless speech produced one false wake.
 - **Echo cancellation (Linux).** On start Moses asks PipeWire/PulseAudio for an echo-cancelled microphone and speaker pair and moves only his own audio onto it, so the mic no longer hears him through open speakers and talking over him is reliable without headphones. Your system's default devices are left as they were, and the pair is removed when he quits.
