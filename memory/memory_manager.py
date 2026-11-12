@@ -1,7 +1,7 @@
 import json
 import re
 from datetime import datetime
-from threading import Lock
+from threading import Lock, RLock
 from pathlib import Path
 import sys
 
@@ -18,6 +18,7 @@ EPISODES_PATH    = BASE_DIR / "memory" / "episodes.json"
 PENDING_PATH     = BASE_DIR / "memory" / "pending_turns.json"
 _lock            = Lock()
 _ep_lock         = Lock()
+_rmw             = RLock()   # one load→change→save at a time: the voice loop and the memory panel both write
 MAX_VALUE_LENGTH = 380
 MEMORY_MAX_CHARS = 12000   # on-disk cap for ORDINARY facts (the prompt block has its own 2000-char cap)
 MAX_EPISODES     = 60      # keep the most recent N session memories
@@ -143,10 +144,11 @@ def _recursive_update(target: dict, updates: dict) -> bool:
 def update_memory(memory_update: dict) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return load_memory()
-    memory = load_memory()
-    if _recursive_update(memory, memory_update):
-        save_memory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+    with _rmw:
+        memory = load_memory()
+        if _recursive_update(memory, memory_update):
+            save_memory(memory)
+            print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
 
 def format_memory_for_prompt(memory: dict | None) -> str:
@@ -235,11 +237,12 @@ def save_fact(category: str, key: str, value: str, importance: str | None = None
     if replaces and "/" in replaces:
         old_cat, old_key = [x.strip() for x in replaces.split("/", 1)]
         if (old_cat, old_key) != (category, key):
-            mem = load_memory()
-            if old_key in mem.get(old_cat, {}):
-                del mem[old_cat][old_key]
-                save_memory(mem)
-                print(f"[Memory] ♻️  {old_cat}/{old_key} replaced by {category}/{key}")
+            with _rmw:
+                mem = load_memory()
+                if old_key in mem.get(old_cat, {}):
+                    del mem[old_cat][old_key]
+                    save_memory(mem)
+                    print(f"[Memory] ♻️  {old_cat}/{old_key} replaced by {category}/{key}")
     update_memory({category: {key: payload}})
     return f"Saved {category}/{key}"
 
@@ -251,6 +254,11 @@ def forget_matching(query: str = "", category: str = "", key: str = "") -> list[
     contains ALL the meaningful words of the query is deleted — strict on
     purpose: forgetting the wrong thing is worse than asking again.
     """
+    with _rmw:
+        return _forget_matching(query, category, key)
+
+
+def _forget_matching(query: str, category: str, key: str) -> list[str]:
     removed: list[str] = []
     mem = load_memory()
     if category and key:
@@ -290,17 +298,99 @@ def remember(key: str, value: str, category: str = "notes") -> str:
 
 
 def forget(key: str, category: str = "notes") -> str:
-    memory = load_memory()
-    cat    = memory.get(category, {})
-    if key in cat:
-        del cat[key]
-        memory[category] = cat
-        save_memory(memory)
-        return f"Forgotten: {category}/{key}"
-    return f"Not found: {category}/{key}"
+    return f"Forgotten: {category}/{key}" if delete_fact(category, key) else f"Not found: {category}/{key}"
 
 
 forget_memory = forget
+
+
+# ── By hand: the memory panel (ui_memory.py) ────────────────────────────────
+# What they see there is exactly what is stored, and what they change is
+# exactly what is kept — no merging, no keyword matching.
+
+def edit_fact(category: str, key: str, value: str, importance: str | None = None) -> dict:
+    """Set one fact to exactly this. importance None (or anything but important /
+    critical) clears the mark. Raises ValueError for an empty value."""
+    value = _truncate_value((value or "").strip())
+    if not value:
+        raise ValueError("a memory needs some text — delete it instead")
+    entry = {"value": value, "updated": datetime.now().strftime("%Y-%m-%d")}
+    if importance in ("important", "critical"):
+        entry["importance"] = importance
+    with _rmw:
+        mem = load_memory()
+        if not isinstance(mem.get(category), dict):
+            mem[category] = {}
+        mem[category][key] = entry
+        save_memory(mem)
+    print(f"[Memory] ✏️  {category}/{key} edited by hand")
+    return entry
+
+
+def delete_fact(category: str, key: str) -> bool:
+    with _rmw:
+        mem = load_memory()
+        if key not in mem.get(category, {}):
+            return False
+        del mem[category][key]
+        save_memory(mem)
+    print(f"[Memory] 🧹 Forgot {category}/{key}")
+    return True
+
+
+def _same_episode(a: dict, b: dict) -> bool:
+    return all(a.get(f) == b.get(f) for f in ("date", "time", "summary"))
+
+
+def _rewrite_episodes(change) -> bool:
+    """change(list) edits the list in place and says whether it did."""
+    with _ep_lock:
+        eps = load_episodes_unlocked()
+        if not change(eps):
+            return False
+        EPISODES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        EPISODES_PATH.write_text(json.dumps(eps, indent=2, ensure_ascii=False), encoding="utf-8")
+        return True
+
+
+def restore_fact(category: str, key: str, entry: dict) -> None:
+    """Put back a fact exactly as it was (the panel's Undo)."""
+    with _rmw:
+        mem = load_memory()
+        if not isinstance(mem.get(category), dict):
+            mem[category] = {}
+        mem[category][key] = dict(entry)
+        save_memory(mem)
+
+
+def restore_episode(episode: dict, index: int) -> None:
+    def change(eps):
+        eps.insert(max(0, min(index, len(eps))), dict(episode))
+        return True
+    _rewrite_episodes(change)
+
+
+def edit_episode(episode: dict, summary: str) -> bool:
+    summary = (summary or "").strip()[:400]
+    if not summary:
+        raise ValueError("a memory needs some text — delete it instead")
+    def change(eps):
+        for e in eps:
+            if _same_episode(e, episode):
+                e["summary"] = summary
+                return True
+        return False
+    return _rewrite_episodes(change)
+
+
+def delete_episode(episode: dict) -> bool:
+    def change(eps):
+        for i, e in enumerate(eps):
+            if _same_episode(e, episode):
+                del eps[i]
+                return True
+        return False
+    return _rewrite_episodes(change)
 
 
 # ───────────────────────────────────────────────────────────────────────────
